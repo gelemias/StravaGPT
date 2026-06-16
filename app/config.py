@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     )
     strava_scopes: str = Field(default="read,activity:read_all", alias="STRAVA_SCOPES")
     database_path: str = Field(default="./stravagpt.db", alias="DATABASE_PATH")
+    turso_database_url: str | None = Field(default=None, alias="TURSO_DATABASE_URL")
+    turso_auth_token: str | None = Field(default=None, alias="TURSO_AUTH_TOKEN")
     chatgpt_api_key: str | None = Field(default=None, alias="CHATGPT_API_KEY")
     public_base_url: str | None = Field(default=None, alias="PUBLIC_BASE_URL")
     sync_on_startup: bool = Field(default=True, alias="SYNC_ON_STARTUP")
@@ -38,6 +40,10 @@ class Settings(BaseSettings):
     @property
     def strava_configured(self) -> bool:
         return bool(self.strava_client_id) and bool(self.strava_client_secret)
+
+    @property
+    def storage_backend(self) -> str:
+        return "turso" if self.turso_database_url else "sqlite"
 
 
 @lru_cache

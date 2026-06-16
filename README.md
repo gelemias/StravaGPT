@@ -6,7 +6,7 @@ A small FastAPI backend that connects to your Strava account, syncs activities i
 
 - Strava OAuth login and callback handling.
 - Automatic access-token refresh using the stored refresh token.
-- Activity sync from Strava into a local SQLite database.
+- Activity sync from Strava into local SQLite or Turso/libSQL.
 - Local API endpoints for synced activities and simple training summary stats.
 
 ## Setup
@@ -75,6 +75,45 @@ STARTUP_SYNC_PER_PAGE=30
 ```
 
 Startup sync is incremental: it asks Strava for activities after the latest activity already stored locally.
+
+## Turso Storage
+
+For a free hosted database, create a Turso database and set these environment variables:
+
+```env
+TURSO_DATABASE_URL=libsql://your-db-your-org.turso.io
+TURSO_AUTH_TOKEN=your-turso-token
+```
+
+When `TURSO_DATABASE_URL` is set, the app uses Turso instead of the local `DATABASE_PATH` SQLite file.
+
+Typical Turso CLI flow:
+
+```bash
+turso db create stravagpt
+turso db show --url stravagpt
+turso db tokens create stravagpt
+```
+
+On Render Free, keep the same build and start commands:
+
+```bash
+pip install -e .
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+Then set the Render environment variables:
+
+```env
+PYTHON_VERSION=3.12.0
+TURSO_DATABASE_URL=libsql://your-db-your-org.turso.io
+TURSO_AUTH_TOKEN=your-turso-token
+PUBLIC_BASE_URL=https://your-service-name.onrender.com
+STRAVA_REDIRECT_URI=https://your-service-name.onrender.com/auth/callback
+CHATGPT_API_KEY=your-long-random-secret
+STRAVA_CLIENT_ID=your-strava-client-id
+STRAVA_CLIENT_SECRET=your-strava-client-secret
+```
 
 ## Connect to ChatGPT
 

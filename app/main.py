@@ -50,7 +50,11 @@ async def sync_on_startup(settings: Settings, storage: Storage) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    storage = Storage(settings.database_path)
+    storage = Storage(
+        settings.database_path,
+        turso_database_url=settings.turso_database_url,
+        turso_auth_token=settings.turso_auth_token,
+    )
     storage.init_db()
     startup_sync_task = asyncio.create_task(sync_on_startup(settings, storage))
     yield
@@ -61,7 +65,11 @@ app = FastAPI(title="stravaGPT", version="0.1.0", lifespan=lifespan)
 
 
 def get_storage(settings: Annotated[Settings, Depends(get_settings)]) -> Storage:
-    return Storage(settings.database_path)
+    return Storage(
+        settings.database_path,
+        turso_database_url=settings.turso_database_url,
+        turso_auth_token=settings.turso_auth_token,
+    )
 
 
 def get_strava_client(
@@ -99,7 +107,8 @@ def health(
     storage.init_db()
     return {
         "ok": True,
-        "database_path": settings.database_path,
+        "storage_backend": settings.storage_backend,
+        "database_path": settings.database_path if settings.storage_backend == "sqlite" else None,
         "strava_configured": settings.strava_configured,
         "authorized": storage.get_token() is not None,
         "sync_on_startup": settings.sync_on_startup,
@@ -121,19 +130,15 @@ def chatgpt_openapi(
 ) -> dict[str, object]:
     base_url = settings.public_base_url or str(request.base_url).rstrip("/")
     security = [{"apiKeyAuth": []}] if settings.chatgpt_api_key else []
-    components = (
-        {
-            "securitySchemes": {
-                "apiKeyAuth": {
-                    "type": "apiKey",
-                    "in": "header",
-                    "name": "X-API-Key",
-                }
+    components = {"schemas": {}}
+    if settings.chatgpt_api_key:
+        components["securitySchemes"] = {
+            "apiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
             }
         }
-        if settings.chatgpt_api_key
-        else {}
-    )
     return {
         "openapi": "3.1.0",
         "info": {
