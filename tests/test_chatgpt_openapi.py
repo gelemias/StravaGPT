@@ -14,9 +14,9 @@ def test_chatgpt_openapi_components_schemas_is_object():
     assert schema["components"]["schemas"] == {}
 
 
-def test_chatgpt_openapi_server_url_has_no_trailing_slash():
+def test_chatgpt_openapi_server_url_has_trailing_slash():
     app.dependency_overrides[get_settings] = lambda: Settings(
-        PUBLIC_BASE_URL="https://stravagpt.onrender.com/"
+        PUBLIC_BASE_URL="https://stravagpt.onrender.com"
     )
     client = TestClient(app)
 
@@ -27,4 +27,13 @@ def test_chatgpt_openapi_server_url_has_no_trailing_slash():
 
     assert response.status_code == 200
     schema = response.json()
-    assert schema["servers"] == [{"url": "https://stravagpt.onrender.com"}]
+    assert schema["servers"] == [{"url": "https://stravagpt.onrender.com/"}]
+
+
+def test_duplicate_leading_slashes_are_normalized():
+    client = TestClient(app)
+
+    response = client.get("http://testserver//training/context")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing or invalid API key."

@@ -64,6 +64,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="stravaGPT", version="0.1.0", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def normalize_leading_slashes(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if isinstance(path, str) and path.startswith("//"):
+        request.scope["path"] = "/" + path.lstrip("/")
+    return await call_next(request)
+
+
 def get_storage(settings: Annotated[Settings, Depends(get_settings)]) -> Storage:
     return Storage(
         settings.database_path,
@@ -128,7 +136,7 @@ def chatgpt_openapi(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, object]:
-    base_url = (settings.public_base_url or str(request.base_url)).rstrip("/")
+    base_url = (settings.public_base_url or str(request.base_url)).rstrip("/") + "/"
     security = [{"apiKeyAuth": []}] if settings.chatgpt_api_key else []
     components = {"schemas": {}}
     if settings.chatgpt_api_key:
