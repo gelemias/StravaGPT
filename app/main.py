@@ -128,7 +128,7 @@ def chatgpt_openapi(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, object]:
-    base_url = settings.public_base_url or str(request.base_url).rstrip("/")
+    base_url = (settings.public_base_url or str(request.base_url)).rstrip("/")
     security = [{"apiKeyAuth": []}] if settings.chatgpt_api_key else []
     components = {"schemas": {}}
     if settings.chatgpt_api_key:
