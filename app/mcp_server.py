@@ -435,12 +435,23 @@ def _mcp_routes(settings: IntervalsSettings) -> list[Route]:
     )
     http_app = mcp.streamable_http_app()
 
+    first = http_app.routes[0]
+    endpoint = getattr(first, "app", None) or first.endpoint
+
+    # The two mechanisms are alternatives, not requirements to combine. A secret
+    # path IS the credential, so requiring the header on top of it would lock out
+    # exactly the header-less clients it exists for: those clients get 401, read
+    # it as "this server speaks OAuth", and fail on dynamic client registration.
     routes: list[Route] = []
-    for route in http_app.routes:
-        endpoint = getattr(route, "app", None) or route.endpoint
+    if settings.mcp_path_token:
+        routes.append(Route(path, endpoint=endpoint))
         if settings.mcp_api_key:
-            endpoint = ApiKeyGuard(endpoint, settings.mcp_api_key)
-        routes.append(Route(route.path, endpoint=endpoint))
+            # Keep header auth usable in parallel, on the plain /mcp path.
+            routes.append(Route("/mcp", endpoint=ApiKeyGuard(endpoint, settings.mcp_api_key)))
+    elif settings.mcp_api_key:
+        routes.append(Route(path, endpoint=ApiKeyGuard(endpoint, settings.mcp_api_key)))
+    else:
+        routes.append(Route(path, endpoint=endpoint))
     return routes
 
 

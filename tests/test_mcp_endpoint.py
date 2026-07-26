@@ -93,6 +93,51 @@ def test_health_never_exposes_the_secret_path_token():
     assert mcp_display_path(IntervalsSettings(INTERVALS_API_KEY="x")) == "/mcp"
 
 
+def test_secret_path_does_not_also_require_the_api_key_header():
+    """The two mechanisms are alternatives.
+
+    Requiring the header on top of a secret path locks out the header-less
+    clients the path exists for: they get 401, read it as an OAuth challenge,
+    and fail on dynamic client registration.
+    """
+    from app.mcp_server import ApiKeyGuard, _mcp_routes
+
+    both = IntervalsSettings(
+        INTERVALS_API_KEY="x",
+        MCP_API_KEY="header-key",
+        MCP_PATH_TOKEN="path-token",
+    )
+    routes = {route.path: route for route in _mcp_routes(both)}
+
+    # The secret path is reachable with no header at all...
+    assert not isinstance(routes["/mcp/path-token"].app, ApiKeyGuard)
+    # ...while header auth stays available in parallel on the plain path.
+    assert isinstance(routes["/mcp"].app, ApiKeyGuard)
+
+
+def test_api_key_only_guards_the_plain_path():
+    from app.mcp_server import ApiKeyGuard, _mcp_routes
+
+    routes = _mcp_routes(
+        IntervalsSettings(INTERVALS_API_KEY="x", MCP_API_KEY="header-key", MCP_PATH_TOKEN=None)
+    )
+
+    assert len(routes) == 1
+    assert routes[0].path == "/mcp"
+    assert isinstance(routes[0].app, ApiKeyGuard)
+
+
+def test_no_auth_configured_leaves_the_endpoint_open():
+    from app.mcp_server import ApiKeyGuard, _mcp_routes
+
+    routes = _mcp_routes(
+        IntervalsSettings(INTERVALS_API_KEY="x", MCP_API_KEY=None, MCP_PATH_TOKEN=None)
+    )
+
+    assert len(routes) == 1
+    assert not isinstance(routes[0].app, ApiKeyGuard)
+
+
 def test_mcp_endpoint_is_served_at_the_expected_path():
     assert mcp_endpoint_path(IntervalsSettings(INTERVALS_API_KEY="x")) == "/mcp"
     assert (

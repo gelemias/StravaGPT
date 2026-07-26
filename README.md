@@ -235,7 +235,20 @@ MCP_PATH_TOKEN=8f3c1d9a4b7e2f60
 https://your-service-name.onrender.com/mcp/8f3c1d9a4b7e2f60
 ```
 
-Treat that URL as a credential. Both mechanisms can be enabled at once.
+Treat that URL as a credential.
+
+The two mechanisms are **alternatives**, and either one on its own grants access.
+With both set, the server exposes two paths:
+
+| Path | Requires | For |
+| --- | --- | --- |
+| `/mcp/<MCP_PATH_TOKEN>` | nothing else — the path is the credential | claude.ai connectors |
+| `/mcp` | the `X-API-Key` / `Bearer` header | Claude Code, local development |
+
+Do **not** expect a secret path to also demand the header. Requiring both would
+lock out the header-less clients the path exists for: they receive 401, read it
+as an OAuth challenge, and fail with "Couldn't register with the sign-in
+service" because this server implements no OAuth endpoints.
 
 `GET /health` reports the path as `/mcp/<MCP_PATH_TOKEN>` rather than the real
 value, because `/health` itself needs no authentication. If you lose the token,
