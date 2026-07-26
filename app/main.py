@@ -12,6 +12,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, sta
 from fastapi.responses import RedirectResponse
 
 from app.config import Settings, get_settings
+from app.intervals.config import get_intervals_settings
+from app.mcp_server import attach_mcp, mcp_session_lifespan
 from app.storage import Storage
 from app.strava import (
     StravaAuthRequiredError,
@@ -57,11 +59,17 @@ async def lifespan(app: FastAPI):
     )
     storage.init_db()
     startup_sync_task = asyncio.create_task(sync_on_startup(settings, storage))
-    yield
+    # Mounted ASGI apps never receive lifespan events, so the MCP session
+    # manager is driven from here.
+    async with mcp_session_lifespan():
+        yield
     await startup_sync_task
 
 
 app = FastAPI(title="stravaGPT", version="0.1.0", lifespan=lifespan)
+
+# The Intervals.icu MCP server is independent of everything Strava above it.
+MCP_PATH = attach_mcp(app)
 
 
 @app.middleware("http")
@@ -113,6 +121,7 @@ def health(
     storage: Annotated[Storage, Depends(get_storage)],
 ) -> dict[str, object]:
     storage.init_db()
+    intervals = get_intervals_settings()
     return {
         "ok": True,
         "storage_backend": settings.storage_backend,
@@ -121,7 +130,25 @@ def health(
         "authorized": storage.get_token() is not None,
         "sync_on_startup": settings.sync_on_startup,
         "chatgpt_api_key_required": bool(settings.chatgpt_api_key),
+        "mcp": {
+            "path": MCP_PATH,
+            "intervals_api_key_configured": intervals.configured,
+            "athlete_id": intervals.athlete_id,
+            "max_future_days": intervals.max_future_days,
+            "auth": _mcp_auth_mode(intervals.mcp_api_key, intervals.mcp_path_token),
+            # A remote client answered 421 is almost always a Host not listed here.
+            "allowed_hosts": intervals.allowed_hosts,
+        },
     }
+
+
+def _mcp_auth_mode(api_key: str | None, path_token: str | None) -> str:
+    modes = []
+    if api_key:
+        modes.append("api_key_header")
+    if path_token:
+        modes.append("secret_path")
+    return "+".join(modes) if modes else "none"
 
 
 @app.get("/debug/tls")
