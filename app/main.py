@@ -13,7 +13,7 @@ from fastapi.responses import RedirectResponse
 
 from app.config import Settings, get_settings
 from app.intervals.config import get_intervals_settings
-from app.mcp_server import attach_mcp, mcp_session_lifespan
+from app.mcp_server import attach_mcp, mcp_display_path, mcp_session_lifespan
 from app.storage import Storage
 from app.strava import (
     StravaAuthRequiredError,
@@ -131,7 +131,8 @@ def health(
         "sync_on_startup": settings.sync_on_startup,
         "chatgpt_api_key_required": bool(settings.chatgpt_api_key),
         "mcp": {
-            "path": MCP_PATH,
+            # Redacted: /health is unauthenticated, and MCP_PATH_TOKEN is a credential.
+            "path": mcp_display_path(intervals),
             "intervals_api_key_configured": intervals.configured,
             "athlete_id": intervals.athlete_id,
             "max_future_days": intervals.max_future_days,

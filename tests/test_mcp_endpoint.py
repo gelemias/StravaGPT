@@ -79,6 +79,20 @@ def tool_payload(result: dict) -> dict:
     return json.loads(content["content"][0]["text"])
 
 
+def test_health_never_exposes_the_secret_path_token():
+    """/health is unauthenticated, so MCP_PATH_TOKEN must not appear in it."""
+    from app.mcp_server import mcp_display_path
+
+    settings = IntervalsSettings(INTERVALS_API_KEY="x", MCP_PATH_TOKEN="s3cret-token")
+
+    # The router needs the real path, the health payload must not reveal it.
+    assert mcp_endpoint_path(settings) == "/mcp/s3cret-token"
+    assert mcp_display_path(settings) == "/mcp/<MCP_PATH_TOKEN>"
+    assert "s3cret-token" not in mcp_display_path(settings)
+
+    assert mcp_display_path(IntervalsSettings(INTERVALS_API_KEY="x")) == "/mcp"
+
+
 def test_mcp_endpoint_is_served_at_the_expected_path():
     assert mcp_endpoint_path(IntervalsSettings(INTERVALS_API_KEY="x")) == "/mcp"
     assert (

@@ -223,7 +223,9 @@ Locally, use `http://localhost:8000/mcp`. Check it with `/mcp` inside Claude Cod
 Add a custom connector pointing at `https://your-service-name.onrender.com/mcp`.
 Custom connectors cannot send arbitrary headers, so `MCP_API_KEY` is not usable
 there. Set `MCP_PATH_TOKEN` to a long random string instead and register the
-resulting URL, which keeps the secret in the path:
+resulting URL, which keeps the secret in the path. Use a **different** value from
+`MCP_API_KEY` — they are separate credentials, and reusing one string means
+compromising either one compromises both:
 
 ```env
 MCP_PATH_TOKEN=8f3c1d9a4b7e2f60
@@ -234,6 +236,10 @@ https://your-service-name.onrender.com/mcp/8f3c1d9a4b7e2f60
 ```
 
 Treat that URL as a credential. Both mechanisms can be enabled at once.
+
+`GET /health` reports the path as `/mcp/<MCP_PATH_TOKEN>` rather than the real
+value, because `/health` itself needs no authentication. If you lose the token,
+read it from your deployment's environment variables, not from `/health`.
 
 ### Suggested workflow
 
