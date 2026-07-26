@@ -377,6 +377,17 @@ def mcp_endpoint_path(settings: IntervalsSettings) -> str:
     return f"/mcp/{token}" if token else "/mcp"
 
 
+def mcp_display_path(settings: IntervalsSettings) -> str:
+    """The MCP path with the secret token redacted.
+
+    ``MCP_PATH_TOKEN`` is a credential: it is the whole authentication story for
+    clients that cannot send headers. Never return the real path from an
+    unauthenticated endpoint such as /health.
+    """
+    token = (settings.mcp_path_token or "").strip("/ ")
+    return "/mcp/<MCP_PATH_TOKEN>" if token else "/mcp"
+
+
 class ApiKeyGuard:
     """ASGI middleware requiring ``MCP_API_KEY`` via header, when configured."""
 
