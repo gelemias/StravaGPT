@@ -1,13 +1,14 @@
 [project]
 name = "stravagpt"
 version = "0.1.0"
-description = "A lightweight local backend for syncing Strava activities for later training analysis."
+description = "An Intervals.icu MCP server for planned workouts, plus the legacy Strava sync backend."
 requires-python = ">=3.11"
 dependencies = [
     "certifi>=2024.8.30",
     "fastapi>=0.115.0",
     "httpx>=0.27.0",
     "libsql>=0.1.10",
+    "mcp>=1.9.0",
     "pydantic-settings>=2.4.0",
     "truststore>=0.10.0",
     "uvicorn[standard]>=0.30.0",
