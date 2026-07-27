@@ -238,6 +238,9 @@ def test_build_event_payload_shape():
         "type": "Run",
         "name": "Easy run",
         "description": "- 30m 70% Pace",
+        # Intervals.icu parses the text itself; the documented form is
+        # description-only, not a hand-built steps array.
+        "workout_doc": {"description": "- 30m 70% Pace"},
         "moving_time": 1800,
         "target": "PACE",
         "external_id": "w1-mon",
@@ -263,6 +266,53 @@ def test_threshold_pace_ignores_missing_or_absurd_values():
     assert threshold_pace_seconds_per_km([{"types": ["Run"]}], "Run") is None
     assert threshold_pace_seconds_per_km([{"types": ["Run"], "threshold_pace": 0}], "Run") is None
     assert threshold_pace_seconds_per_km("nonsense", "Run") is None
+
+
+def test_inspect_step_targets_flags_a_power_target():
+    """A step that resolved to power means a percentage lost its Pace qualifier."""
+    from app.intervals.client import inspect_step_targets
+
+    report = inspect_step_targets(
+        {
+            "workout_doc": {"steps": [{"power": {"start": 10, "end": 10, "units": "%ftp"}}]},
+            "icu_training_load": 0,
+        }
+    )
+
+    assert report["has_workout_doc"] is True
+    assert report["step_count"] == 1
+    assert report["mentions_power"] is True
+    assert report["training_load"] == 0
+
+
+def test_inspect_step_targets_reports_pace_and_load():
+    from app.intervals.client import inspect_step_targets
+
+    report = inspect_step_targets(
+        {
+            "workout_doc": {
+                "steps": [
+                    {"distance": 2000, "pace": {"start": 3.9, "end": 4.0, "units": "MPS"}}
+                ]
+            },
+            "icu_training_load": 87,
+        }
+    )
+
+    assert report["mentions_pace"] is True
+    assert report["mentions_power"] is False
+    assert report["training_load"] == 87
+    assert report["load_fields"] == {"icu_training_load": 87}
+
+
+def test_inspect_step_targets_handles_a_missing_workout_doc():
+    from app.intervals.client import inspect_step_targets
+
+    report = inspect_step_targets({"id": 1})
+
+    assert report["has_workout_doc"] is False
+    assert report["step_count"] is None
+    assert report["training_load"] == 0
 
 
 def test_format_pace():

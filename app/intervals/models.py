@@ -217,13 +217,23 @@ class WorkoutSpec(BaseModel):
 
 
 def build_event(spec: WorkoutSpec, description: str, moving_time: int, target: str) -> dict:
-    """Build the Intervals.icu calendar event payload for one workout."""
+    """Build the Intervals.icu calendar event payload for one workout.
+
+    The structured workout is not hand-built here. Intervals.icu parses the
+    description text into steps itself - pushing "16000m" once came back with
+    moving_time 960000, i.e. the server had already parsed and recomputed it -
+    and the documented guidance is to use the description-only form of
+    workout_doc rather than supplying a steps array. What makes a step's target
+    resolve as pace rather than power is the text itself, which is why every
+    percentage is rendered with an explicit "Pace" or "HR" qualifier.
+    """
     return {
         "category": "WORKOUT",
         "start_date_local": spec.start_date_local,
         "type": spec.sport,
         "name": spec.name,
         "description": description,
+        "workout_doc": {"description": description},
         "moving_time": moving_time,
         "target": target,
         "external_id": spec.external_id,

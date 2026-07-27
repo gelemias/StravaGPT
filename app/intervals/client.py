@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import ssl
 from typing import Any
 
@@ -67,6 +68,37 @@ def threshold_pace_seconds_per_km(
             if 0.5 <= metres_per_second <= 20.0:
                 return 1000.0 / metres_per_second
     return None
+
+
+def inspect_step_targets(event: dict[str, Any]) -> dict[str, Any]:
+    """Summarise how Intervals.icu actually resolved a pushed workout.
+
+    Used to answer three questions after a push without guessing at the
+    workout_doc schema, which the official OpenAPI spec leaves untyped:
+    did the steps get a target at all, is that target pace or power, and did a
+    training load get computed.
+    """
+    doc = event.get("workout_doc")
+    steps = doc.get("steps") if isinstance(doc, dict) else None
+    serialized = json.dumps(doc, ensure_ascii=False).lower() if doc is not None else ""
+
+    load_fields = {
+        key: value
+        for key, value in event.items()
+        if "load" in key.lower() and isinstance(value, (int, float))
+    }
+
+    return {
+        "has_workout_doc": doc is not None,
+        "step_count": len(steps) if isinstance(steps, list) else None,
+        "mentions_pace": "pace" in serialized,
+        "mentions_power": "power" in serialized or '"watts"' in serialized,
+        "load_fields": load_fields,
+        "training_load": next(
+            (value for value in load_fields.values() if value), 0
+        ),
+        "workout_doc": doc,
+    }
 
 
 def format_pace(seconds_per_km: float) -> str:
@@ -137,10 +169,16 @@ class IntervalsClient:
         oldest: str,
         newest: str,
         category: str | None = None,
+        resolve: bool = False,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"oldest": oldest, "newest": newest}
         if category:
             params["category"] = category
+        if resolve:
+            # Asks Intervals.icu to return each step's target resolved into real
+            # values instead of percentages, which is how you check that a step
+            # came out as pace rather than power.
+            params["resolve"] = "true"
         body = await self._request(
             "GET",
             f"{self.settings.athlete_path}/events",
@@ -149,6 +187,14 @@ class IntervalsClient:
         if isinstance(body, list):
             return [event for event in body if isinstance(event, dict)]
         return []
+
+    async def get_event(self, event_id: int, *, resolve: bool = True) -> Any:
+        params = {"resolve": "true"} if resolve else None
+        return await self._request(
+            "GET",
+            f"{self.settings.athlete_path}/events/{event_id}",
+            params=params,
+        )
 
     async def bulk_upsert_events(self, events: list[dict[str, Any]]) -> Any:
         return await self._request(
