@@ -21,7 +21,12 @@ from pydantic import Field
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
-from app.intervals.client import IntervalsClient, format_pace, threshold_pace_seconds_per_km
+from app.intervals.client import (
+    IntervalsClient,
+    format_pace,
+    inspect_step_targets,
+    threshold_pace_seconds_per_km,
+)
 from app.intervals.config import IntervalsSettings, get_intervals_settings
 from app.intervals.errors import IntervalsError
 from app.intervals.models import (
@@ -200,6 +205,16 @@ async def list_events(
         bool,
         Field(description="Include the full step description of each event."),
     ] = False,
+    inspect_targets: Annotated[
+        bool,
+        Field(
+            description=(
+                "Resolve each step's target and report whether it came out as pace or "
+                "power, and whether a training load was computed. Use this to verify a "
+                "push actually reached the watch as a pace workout."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Read the Intervals.icu calendar between two dates."""
     oldest_date = _parse_date(oldest, "oldest")
@@ -212,11 +227,17 @@ async def list_events(
             oldest=oldest_date.isoformat(),
             newest=newest_date.isoformat(),
             category=category,
+            resolve=inspect_targets,
         )
     except IntervalsError as exc:
         raise _fail(exc) from exc
 
     summaries = [_summarize_event(event, include_description=include_description) for event in events]
+    if inspect_targets:
+        for summary, event in zip(summaries, events, strict=True):
+            report = inspect_step_targets(event)
+            report.pop("workout_doc", None)
+            summary["targets"] = report
     return {
         "oldest": oldest_date.isoformat(),
         "newest": newest_date.isoformat(),

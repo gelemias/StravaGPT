@@ -21,7 +21,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.intervals.client import IntervalsClient, format_pace  # noqa: E402
+from app.intervals.client import (  # noqa: E402
+    IntervalsClient,
+    format_pace,
+    inspect_step_targets,
+)
 from app.intervals.config import get_intervals_settings  # noqa: E402
 from app.intervals.errors import IntervalsError  # noqa: E402
 from app.intervals.models import WorkoutSpec, build_event  # noqa: E402
@@ -178,6 +182,55 @@ async def run(target_date: date, keep: bool) -> int:
         "If it arrives with a fixed time instead, set INTERVALS_OPEN_STEP_STYLE=nominal "
         "and report what the UI shows."
     )
+
+    # 3b. The structured targets: pace, not power, and a computed training load.
+    print("\n3b. Checking the resolved step targets and training load")
+    failures = 0
+    try:
+        resolved = await client.list_events(
+            oldest=day, newest=day, category="WORKOUT", resolve=True
+        )
+    except IntervalsError as exc:
+        log_fail(str(exc))
+        return 1
+
+    for event in resolved:
+        if event.get("external_id") not in specs:
+            continue
+        report = inspect_step_targets(event)
+        name = event.get("external_id")
+
+        if not report["has_workout_doc"]:
+            log_fail(f"{name}: no structured workout_doc came back")
+            failures += 1
+        elif report["mentions_power"]:
+            log_fail(
+                f"{name}: a step resolved to POWER. Every percentage must carry an "
+                "explicit 'Pace' qualifier, or Intervals.icu reads it as % of FTP."
+            )
+            failures += 1
+        elif not report["mentions_pace"]:
+            log_fail(f"{name}: no pace target in the resolved steps")
+            failures += 1
+        else:
+            log_ok(f"{name}: steps resolved with pace targets ({report['step_count']} steps)")
+
+        load = report["training_load"]
+        if load and load > 0:
+            log_ok(f"{name}: training load {load} ({', '.join(report['load_fields'])})")
+        else:
+            log_fail(
+                f"{name}: no training load computed. Check that Sport Settings has a "
+                f"threshold pace for Run. Load-like fields seen: {report['load_fields'] or 'none'}"
+            )
+            failures += 1
+
+    if failures:
+        log_info(
+            "Structured targets are wrong. The description text is what Intervals.icu "
+            "parses, so inspect it above rather than hand-building workout_doc steps."
+        )
+        return 1
 
     if keep:
         print(f"\n--keep given: leaving {sorted(specs)} on the calendar. Delete them yourself.")
