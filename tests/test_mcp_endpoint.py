@@ -282,7 +282,7 @@ def test_push_workouts_dry_run_renders_without_calling_the_api(client):
     assert workout["external_id"] == "w2-wed"
     assert workout["target"] == "PACE"
     assert workout["description"] == (
-        "- 15m 70% Warmup\n\n4x\n- 2000m 4:00-4:02/km\n- 2m 70%\n\n- 10m 70% Cooldown"
+        "- 15m 70% Pace Warmup\n\n4x\n- 2km 4:00-4:02/km\n- 2m 70% Pace\n\n- 10m 70% Pace Cooldown"
     )
 
 

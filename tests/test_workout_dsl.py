@@ -64,9 +64,11 @@ def test_format_duration(seconds, expected):
     assert format_duration(seconds) == expected
 
 
-def test_format_distance_uses_meters():
-    assert format_distance(2000.0) == "2000m"
-    assert format_distance(1609.344) == "1609m"
+def test_format_distance_never_uses_a_bare_m_suffix():
+    assert format_distance(2000.0) == "2km"
+    assert format_distance(9000.0) == "9km"
+    assert format_distance(400.0) == "400mtr"
+    assert format_distance(1609.344) == "1609mtr"
 
 
 # --------------------------------------------------------------------------
@@ -74,16 +76,55 @@ def test_format_distance_uses_meters():
 # --------------------------------------------------------------------------
 
 
+def test_distance_steps_never_render_with_a_bare_m_suffix():
+    """Regression: Intervals.icu reads "m" as MINUTES, not metres.
+
+    A pushed workout containing "- 16000m 70%" and "- 6000m 4:15/km" came back
+    from the API with moving_time 1320000 == (16000 + 6000) * 60, and the watch
+    showed 366:40:00. Distances must use km or mtr.
+    """
+    spec = WorkoutSpec(
+        date="2026-08-02",
+        name="Long run 22km",
+        target_type="pace",
+        external_id="long",
+        steps=[
+            {"type": "work", "distance": "16000m", "target": "easy"},
+            {"type": "work", "distance": "6000m", "target": "4:15/km"},
+            {"type": "work", "distance": "400m", "target": "4:00/km"},
+        ],
+    )
+
+    description = render_workout(spec).description
+
+    assert description == (
+        "- 16km 70% Pace\n- 6km 4:15/km\n- 400mtr 4:00/km"
+    )
+    # No step may end its length in a bare "m", which would mean minutes.
+    for line in description.splitlines():
+        length = line.split()[1]
+        assert not length.endswith("m") or length.endswith(("km", "mtr")), length
+
+
+def test_percent_targets_are_qualified_so_they_are_not_read_as_power():
+    """Regression: a bare "70%" is read as 70% of FTP, i.e. power.
+
+    On a run with no FTP configured that reached the watch as "Power | 10-10 W".
+    """
+    assert "70% Pace" in resolve_target("70%", "pace").text
+    assert "70% HR" in resolve_target("70%", "hr").text
+
+
 def test_resolve_target_percent_is_neutral():
     target = resolve_target("75%", "pace")
-    assert target.text == "75%"
+    assert target.text == "75% Pace"
     assert target.kind == "percent"
     assert target.percent == 75
 
 
 def test_resolve_target_percent_range():
     target = resolve_target("95-100%", "pace")
-    assert target.text == "95-100%"
+    assert target.text == "95-100% Pace"
     assert target.percent == pytest.approx(97.5)
 
 
@@ -107,9 +148,9 @@ def test_resolve_target_heart_rate():
 
 
 def test_resolve_target_alias_depends_on_target_type():
-    assert resolve_target("easy", "pace").text == "70%"
-    assert resolve_target("easy", "hr").text == "68%"
-    assert resolve_target("Threshold", "pace").text == "100%"
+    assert resolve_target("easy", "pace").text == "70% Pace"
+    assert resolve_target("easy", "hr").text == "68% HR"
+    assert resolve_target("Threshold", "pace").text == "100% Pace"
 
 
 def test_resolve_target_alias_keeps_original_as_source():
@@ -150,13 +191,13 @@ def test_render_matches_native_intervals_syntax():
     rendered = render_workout(spec, threshold_pace_seconds_per_km=240.0)
 
     assert rendered.description == (
-        "- 15m 70% Warmup\n"
+        "- 15m 70% Pace Warmup\n"
         "\n"
         "4x\n"
-        "- 2000m 4:00-4:02/km\n"
-        "- 2m 70%\n"
+        "- 2km 4:00-4:02/km\n"
+        "- 2m 70% Pace\n"
         "\n"
-        "- 10m 70% Cooldown"
+        "- 10m 70% Pace Cooldown"
     )
     assert rendered.target == "PACE"
 
@@ -183,15 +224,15 @@ def test_render_blank_lines_group_consecutive_plain_steps():
     )
 
     assert render_workout(spec).description == (
-        "- 15m 55% Warmup\n"
+        "- 15m 55% Pace Warmup\n"
         "\n"
         "3x\n"
-        "- 1m 150%\n"
-        "- 1m 50%\n"
+        "- 1m 150% Pace\n"
+        "- 1m 50% Pace\n"
         "\n"
-        "- 5m 50%\n"
-        "- 5m 120%\n"
-        "- 15m 55%"
+        "- 5m 50% Pace\n"
+        "- 5m 120% Pace\n"
+        "- 15m 55% Pace"
     )
 
 
@@ -209,7 +250,7 @@ def test_render_omits_repeat_header_for_single_repetition():
             }
         ],
     )
-    assert render_workout(spec).description == "- 10m 100%"
+    assert render_workout(spec).description == "- 10m 100% Pace"
 
 
 def test_moving_time_sums_time_steps_and_repeats():
@@ -309,7 +350,7 @@ def test_hr_workout_renders_bpm_and_hr_target():
     )
     rendered = render_workout(spec)
     assert rendered.target == "HR"
-    assert rendered.description == "- 10m 68% Warmup\n- 40m 140-150bpm"
+    assert rendered.description == "- 10m 68% HR Warmup\n- 40m 140-150bpm"
 
 
 def test_notes_are_appended_after_the_steps():
@@ -322,7 +363,7 @@ def test_notes_are_appended_after_the_steps():
         steps=[{"type": "work", "duration": "30min", "target": "easy"}],
     )
     assert render_workout(spec).description == (
-        "- 30m 70%\n\nHydrate before starting."
+        "- 30m 70% Pace\n\nHydrate before starting."
     )
 
 
@@ -353,13 +394,13 @@ def test_open_warmup_and_cooldown_render_without_a_length():
     rendered = render_workout(_open_spec())
 
     assert rendered.description == (
-        "- 70% Warmup\n"
+        "- 70% Pace Warmup\n"
         "\n"
         "3x\n"
-        "- 1000m 4:00/km\n"
-        "- 2m 70%\n"
+        "- 1km 4:00/km\n"
+        "- 2m 70% Pace\n"
         "\n"
-        "- 70% Cooldown"
+        "- 70% Pace Cooldown"
     )
     assert rendered.open_steps == 2
 
@@ -382,7 +423,7 @@ def test_explicit_moving_time_silences_the_open_step_estimate_warning():
 def test_nominal_style_emits_a_timed_step_and_warns_it_is_not_open():
     rendered = render_workout(_open_spec(), open_step_style="nominal")
 
-    assert rendered.description.startswith("- 10m 70% Warmup")
+    assert rendered.description.startswith("- 10m 70% Pace Warmup")
     assert any("will NOT reach the watch as an open" in w for w in rendered.warnings)
 
 
@@ -397,7 +438,7 @@ def test_open_step_keeps_a_custom_label_and_target():
 def test_open_step_defaults_to_the_easy_target_when_none_is_given():
     spec = _open_spec(steps=[{"type": "warmup"}])
 
-    assert render_workout(spec).description == "- 70% Warmup"
+    assert render_workout(spec).description == "- 70% Pace Warmup"
 
 
 def test_open_step_still_enforces_the_pace_hr_rule():
@@ -428,4 +469,4 @@ def test_custom_label_is_appended_to_the_step_line():
         external_id="label",
         steps=[{"type": "work", "duration": "20min", "target": "tempo", "label": "Tempo block"}],
     )
-    assert render_workout(spec).description == "- 20m 90% Tempo block"
+    assert render_workout(spec).description == "- 20m 90% Pace Tempo block"

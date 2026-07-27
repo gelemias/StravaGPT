@@ -233,11 +233,19 @@ def format_duration(seconds: int) -> str:
 
 
 def format_distance(meters: float) -> str:
-    """Render a distance in meters, which every Intervals.icu parser accepts."""
+    """Render a distance for the Intervals.icu description.
+
+    NEVER use a bare "m" suffix: in this syntax "m" means MINUTES, so "2000m"
+    parses as 2000 minutes, not 2 km. Verified against the API - a workout
+    containing "16000m" came back with moving_time 960000 (16000 * 60). The
+    distance units are "km" and "mtr".
+    """
     rounded = round(meters)
+    if rounded >= 1000 and rounded % 1000 == 0:
+        return f"{rounded // 1000}km"
     if abs(meters - rounded) < 0.5:
-        return f"{int(rounded)}m"
-    return f"{meters:.1f}m"
+        return f"{int(rounded)}mtr"
+    return f"{meters:.1f}mtr"
 
 
 # --------------------------------------------------------------------------
@@ -350,18 +358,29 @@ def resolve_target(raw: str, target_type: str, *, where: str = "target") -> Targ
         low = float(match.group(1))
         high = float(match.group(2)) if match.group(2) else low
         qualifier = (match.group(3) or "").lower().replace(" ", "")
-        if qualifier in {"lthr", "hr", "maxhr"}:
-            kind = HR_KIND
+        if qualifier == "lthr":
+            suffix, kind = "LTHR", HR_KIND
+        elif qualifier in {"hr", "maxhr"}:
+            suffix, kind = "HR", HR_KIND
         elif qualifier in {"pace", "thresholdpace"}:
-            kind = PACE_KIND
+            suffix, kind = "Pace", PACE_KIND
         else:
+            # A bare percentage is read as a percentage of FTP, i.e. POWER. On a
+            # run that is wrong, and with no FTP configured it produces nonsense
+            # like "10-10 W" on the watch. Always say which threshold it means.
+            suffix = "Pace" if target_type == "pace" else "HR"
             kind = PERCENT_KIND
         low_text = match.group(1).rstrip("0").rstrip(".") if "." in match.group(1) else match.group(1)
         rendered = f"{low_text}%"
         if match.group(2):
             high_text = match.group(2).rstrip("0").rstrip(".") if "." in match.group(2) else match.group(2)
             rendered = f"{low_text}-{high_text}%"
-        return Target(text=rendered, kind=kind, percent=(low + high) / 2, source=text)
+        return Target(
+            text=f"{rendered} {suffix}",
+            kind=kind,
+            percent=(low + high) / 2,
+            source=text,
+        )
 
     known = ", ".join(sorted(aliases))
     raise IntervalsValidationError(
