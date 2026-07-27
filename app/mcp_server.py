@@ -47,6 +47,10 @@ Workflow for pushing a training week:
 3. Call push_workouts for real. It upserts on external_id, so re-pushing the
    same external_id updates the workout instead of creating a duplicate.
 
+A warmup or cooldown with neither "duration" nor "distance" is an open step: it
+runs until the athlete presses the lap button. Every other step type still needs
+a length.
+
 Two hard constraints come from the COROS watch sync, not from Intervals.icu:
 - Only about 7 days of planned workouts transfer to the watch, so push a rolling
   week rather than a whole training block.
@@ -139,6 +143,8 @@ async def push_workouts(
             rendered = render_workout(
                 spec,
                 threshold_pace_seconds_per_km=threshold_paces.get(spec.sport),
+                open_step_style=settings.open_step_style,
+                open_step_nominal_seconds=settings.open_step_nominal_seconds,
             )
             warnings.extend(rendered.warnings)
             events.append(build_event(spec, rendered.description, rendered.moving_time, rendered.target))
@@ -151,6 +157,7 @@ async def push_workouts(
                     "target": rendered.target,
                     "moving_time_seconds": rendered.moving_time,
                     "moving_time_pretty": _pretty_seconds(rendered.moving_time),
+                    "open_steps": rendered.open_steps,
                     "description": rendered.description,
                 }
             )
@@ -435,12 +442,23 @@ def _mcp_routes(settings: IntervalsSettings) -> list[Route]:
     )
     http_app = mcp.streamable_http_app()
 
+    first = http_app.routes[0]
+    endpoint = getattr(first, "app", None) or first.endpoint
+
+    # The two mechanisms are alternatives, not requirements to combine. A secret
+    # path IS the credential, so requiring the header on top of it would lock out
+    # exactly the header-less clients it exists for: those clients get 401, read
+    # it as "this server speaks OAuth", and fail on dynamic client registration.
     routes: list[Route] = []
-    for route in http_app.routes:
-        endpoint = getattr(route, "app", None) or route.endpoint
+    if settings.mcp_path_token:
+        routes.append(Route(path, endpoint=endpoint))
         if settings.mcp_api_key:
-            endpoint = ApiKeyGuard(endpoint, settings.mcp_api_key)
-        routes.append(Route(route.path, endpoint=endpoint))
+            # Keep header auth usable in parallel, on the plain /mcp path.
+            routes.append(Route("/mcp", endpoint=ApiKeyGuard(endpoint, settings.mcp_api_key)))
+    elif settings.mcp_api_key:
+        routes.append(Route(path, endpoint=ApiKeyGuard(endpoint, settings.mcp_api_key)))
+    else:
+        routes.append(Route(path, endpoint=endpoint))
     return routes
 
 

@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.intervals.errors import IntervalsValidationError
-from app.intervals.models import SimpleStep, WorkoutSpec
+from app.intervals.models import OPEN_STEP_TYPES, SimpleStep, WorkoutSpec
 
 
 # --------------------------------------------------------------------------
@@ -70,6 +70,16 @@ ALIAS_TABLES = {"pace": PACE_ALIASES, "hr": HR_ALIASES}
 # Fallback used to estimate moving_time for distance-based steps when neither an
 # absolute pace target nor a threshold pace from sport-settings is available.
 FALLBACK_THRESHOLD_PACE_SECONDS_PER_KM = 300.0
+
+# An open step has no length, so it contributes a nominal amount to moving_time.
+DEFAULT_OPEN_STEP_NOMINAL_SECONDS = 600
+
+# How an open warm-up/cool-down is written into the description.
+#   "no_duration" - the step carries a target but no time or distance.
+#   "nominal"     - the step is written as an ordinary timed step. Use this only
+#                   if Intervals.icu refuses to parse a step without a length;
+#                   it does NOT reach the watch as an open step.
+OPEN_STEP_STYLES = ("no_duration", "nominal")
 
 DEFAULT_STEP_INTENSITY = {
     "warmup": "easy",
@@ -390,6 +400,7 @@ class RenderedWorkout:
     moving_time: int
     target: str
     warnings: list[str] = field(default_factory=list)
+    open_steps: int = 0
 
 
 def _step_seconds(
@@ -421,6 +432,53 @@ def _step_seconds(
     return int(round(meters / 1000.0 * pace))
 
 
+def _render_open_step_line(
+    step: SimpleStep,
+    *,
+    step_type: str,
+    target_type: str,
+    where: str,
+    warnings: list[str],
+    open_step_style: str,
+    open_step_nominal_seconds: int,
+) -> tuple[str, int]:
+    """Render a warm-up/cool-down the athlete ends with the lap button.
+
+    Intervals.icu keeps a duration on an open step for graphing and load, while
+    the watch ignores it and waits for the lap press. The default style emits no
+    length at all; "nominal" is the fallback for the case where Intervals.icu
+    refuses to parse a step without one.
+    """
+    if open_step_style not in OPEN_STEP_STYLES:
+        raise IntervalsValidationError(
+            f"{where}: unknown open step style {open_step_style!r}. "
+            f"Use one of {list(OPEN_STEP_STYLES)}."
+        )
+
+    raw_target = step.target
+    if raw_target is None or str(raw_target).strip() == "":
+        raw_target = DEFAULT_STEP_INTENSITY.get(step_type, "easy")
+    target = resolve_target(raw_target, target_type, where=where)
+    assert_target_matches_workout(target, target_type, where)
+
+    label = step.label or DEFAULT_STEP_LABEL.get(step_type)
+
+    if open_step_style == "nominal":
+        line = f"- {format_duration(open_step_nominal_seconds)} {target.text}"
+        warnings.append(
+            f"{where}: rendered as a fixed "
+            f"{format_duration(open_step_nominal_seconds)} step because "
+            "INTERVALS_OPEN_STEP_STYLE=nominal. It will NOT reach the watch as an "
+            "open lap-button step."
+        )
+    else:
+        line = f"- {target.text}"
+
+    if label:
+        line = f"{line} {label}"
+    return line, open_step_nominal_seconds
+
+
 def _render_step_line(
     step: SimpleStep,
     *,
@@ -429,14 +487,27 @@ def _render_step_line(
     threshold_pace_seconds_per_km: float | None,
     where: str,
     warnings: list[str],
+    open_step_style: str = "no_duration",
+    open_step_nominal_seconds: int = DEFAULT_OPEN_STEP_NOMINAL_SECONDS,
 ) -> tuple[str, int]:
     duration = step.duration
     distance = step.distance
 
     if duration is None and distance is None:
-        raise IntervalsValidationError(
-            f"{where}: needs either a 'duration' (for example '15min') or a "
-            "'distance' (for example '2000m')."
+        if step_type not in OPEN_STEP_TYPES:
+            raise IntervalsValidationError(
+                f"{where}: needs either a 'duration' (for example '15min') or a "
+                "'distance' (for example '2000m'). Only "
+                f"{sorted(OPEN_STEP_TYPES)} may be left open for the lap button."
+            )
+        return _render_open_step_line(
+            step,
+            step_type=step_type,
+            target_type=target_type,
+            where=where,
+            warnings=warnings,
+            open_step_style=open_step_style,
+            open_step_nominal_seconds=open_step_nominal_seconds,
         )
     if duration is not None and distance is not None:
         raise IntervalsValidationError(
@@ -479,6 +550,8 @@ def render_workout(
     spec: WorkoutSpec,
     *,
     threshold_pace_seconds_per_km: float | None = None,
+    open_step_style: str = "no_duration",
+    open_step_nominal_seconds: int = DEFAULT_OPEN_STEP_NOMINAL_SECONDS,
 ) -> RenderedWorkout:
     """Render a workout spec into the native Intervals.icu description text."""
     target_type = spec.target_type
@@ -486,6 +559,7 @@ def render_workout(
     groups: list[list[str]] = []
     current: list[str] = []
     total_seconds = 0
+    open_steps = 0
 
     for index, step in enumerate(spec.steps):
         position = f"workout '{spec.external_id}' step {index + 1} ({step.type})"
@@ -532,7 +606,11 @@ def render_workout(
                 threshold_pace_seconds_per_km=threshold_pace_seconds_per_km,
                 where=position,
                 warnings=warnings,
+                open_step_style=open_step_style,
+                open_step_nominal_seconds=open_step_nominal_seconds,
             )
+            if step.is_open:
+                open_steps += 1
             current.append(line)
             total_seconds += seconds
 
@@ -543,10 +621,18 @@ def render_workout(
     if spec.notes:
         description = f"{description}\n\n{spec.notes}".strip()
 
+    if open_steps and spec.moving_time is None:
+        warnings.append(
+            f"workout '{spec.external_id}': {open_steps} open step(s) counted as "
+            f"{format_duration(open_step_nominal_seconds)} each in moving_time, since "
+            "their real length is decided on the watch. Set 'moving_time' to override."
+        )
+
     moving_time = spec.moving_time or total_seconds
     return RenderedWorkout(
         description=description,
         moving_time=int(moving_time),
         target="PACE" if target_type == "pace" else "HR",
         warnings=warnings,
+        open_steps=open_steps,
     )

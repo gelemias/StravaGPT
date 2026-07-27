@@ -149,6 +149,27 @@ def test_interval_step_requires_a_work_block():
     assert "needs a 'work' block" in str(excinfo.value)
 
 
+def test_only_warmup_and_cooldown_may_be_left_open():
+    """Open steps end on the lap button; every other type needs a length."""
+    assert spec(steps=[{"type": "warmup", "target": "easy"}]).steps[0].is_open
+    assert spec(steps=[{"type": "cooldown", "target": "easy"}]).steps[0].is_open
+
+    for step_type in ("work", "steady", "recovery", "rest"):
+        with pytest.raises(ValidationError) as excinfo:
+            spec(steps=[{"type": step_type, "target": "easy"}])
+        assert "needs either 'duration' or 'distance'" in str(excinfo.value)
+        assert "may be left open" in str(excinfo.value)
+
+
+def test_a_warmup_with_a_duration_is_not_open():
+    assert not spec(steps=[{"type": "warmup", "duration": "15min"}]).steps[0].is_open
+
+
+def test_interval_blocks_cannot_be_left_open():
+    with pytest.raises(ValidationError):
+        spec(steps=[{"type": "interval", "repeat": 3, "work": {"target": "threshold"}}])
+
+
 def test_plain_step_needs_exactly_one_of_duration_or_distance():
     with pytest.raises(ValidationError):
         spec(steps=[{"type": "work", "target": "easy"}])

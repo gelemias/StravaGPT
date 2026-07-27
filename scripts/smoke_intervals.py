@@ -60,14 +60,37 @@ def build_spec(target_date: date, external_id: str) -> WorkoutSpec:
     )
 
 
+def build_open_spec(target_date: date, external_id: str) -> WorkoutSpec:
+    """Same shape, but with a warm-up and cool-down left open for the lap button."""
+    return WorkoutSpec(
+        date=target_date,
+        sport="Run",
+        name="[smoke test] open warmup - delete me",
+        target_type="pace",
+        external_id=external_id,
+        steps=[
+            {"type": "warmup", "target": "easy"},
+            {
+                "type": "interval",
+                "repeat": 2,
+                "work": {"distance": "400m", "target": "threshold"},
+                "recovery": {"duration": "90s", "target": "easy"},
+            },
+            {"type": "cooldown", "target": "easy"},
+        ],
+    )
+
+
 async def run(target_date: date, keep: bool) -> int:
     settings = get_intervals_settings()
     client = IntervalsClient(settings)
-    external_id = f"smoke-test-{target_date.isoformat()}"
+    stamp = target_date.isoformat()
+    external_id = f"smoke-test-{stamp}"
+    open_external_id = f"smoke-test-open-{stamp}"
     day = target_date.isoformat()
 
     print(f"Intervals.icu smoke test  athlete={settings.athlete_id}  date={day}")
-    print(f"external_id={external_id}\n")
+    print(f"open step style: {settings.open_step_style}\n")
 
     # 1. Authentication + sport settings.
     print("1. Reading sport settings (checks authentication)")
@@ -85,62 +108,102 @@ async def run(target_date: date, keep: bool) -> int:
     if threshold:
         log_ok(f"Run threshold pace: {format_pace(threshold)}")
 
-    # 2. Push one workout.
-    print("\n2. Pushing one workout")
-    spec = build_spec(target_date, external_id)
-    rendered = render_workout(spec, threshold_pace_seconds_per_km=threshold)
-    for warning in rendered.warnings:
-        log_info(f"warning: {warning}")
-    log_info(f"target={rendered.target} moving_time={rendered.moving_time}s")
-    for line in rendered.description.splitlines():
-        log_info(f"| {line}")
-
-    event = build_event(spec, rendered.description, rendered.moving_time, rendered.target)
-    try:
-        await client.bulk_upsert_events([event])
-    except IntervalsError as exc:
-        log_fail(str(exc))
-        return 1
-    log_ok("upsert accepted")
-
-    # 3. Verify it is on the calendar.
-    print("\n3. Verifying the workout is on the calendar")
-    try:
-        events = await client.list_events(oldest=day, newest=day, category="WORKOUT")
-    except IntervalsError as exc:
-        log_fail(str(exc))
-        return 1
-    matches = [item for item in events if item.get("external_id") == external_id]
-    if not matches:
-        log_fail(
-            f"workout {external_id} not found on {day}. "
-            f"Events that day: {[item.get('external_id') for item in events]}"
+    # 2. Push both workouts: a fully timed one and one with open warm-up/cool-down.
+    print("\n2. Pushing two workouts (one timed, one with open warm-up/cool-down)")
+    specs = {
+        external_id: build_spec(target_date, external_id),
+        open_external_id: build_open_spec(target_date, open_external_id),
+    }
+    events = []
+    sent_descriptions = {}
+    for spec in specs.values():
+        rendered = render_workout(
+            spec,
+            threshold_pace_seconds_per_km=threshold,
+            open_step_style=settings.open_step_style,
+            open_step_nominal_seconds=settings.open_step_nominal_seconds,
         )
+        sent_descriptions[spec.external_id] = rendered.description
+        print(f"\n   {spec.external_id}  (open steps: {rendered.open_steps})")
+        log_info(f"target={rendered.target} moving_time={rendered.moving_time}s")
+        for line in rendered.description.splitlines():
+            log_info(f"| {line}")
+        for warning in rendered.warnings:
+            log_info(f"warning: {warning}")
+        events.append(
+            build_event(spec, rendered.description, rendered.moving_time, rendered.target)
+        )
+
+    try:
+        await client.bulk_upsert_events(events)
+    except IntervalsError as exc:
+        log_fail(str(exc))
         return 1
-    log_ok(f"found event id={matches[0].get('id')}")
+    log_ok("\nupsert accepted for both workouts")
+
+    # 3. Verify both are on the calendar, and read back what Intervals.icu stored.
+    print("\n3. Verifying the workouts are on the calendar")
+    try:
+        found = await client.list_events(oldest=day, newest=day, category="WORKOUT")
+    except IntervalsError as exc:
+        log_fail(str(exc))
+        return 1
+
+    by_external_id = {item.get("external_id"): item for item in found}
+    for wanted in specs:
+        event = by_external_id.get(wanted)
+        if event is None:
+            log_fail(
+                f"workout {wanted} not found on {day}. "
+                f"Events that day: {sorted(str(key) for key in by_external_id)}"
+            )
+            return 1
+        log_ok(f"found {wanted} (event id={event.get('id')})")
+
+    # The open-step syntax is the part that cannot be verified offline, so show
+    # exactly what came back and whether Intervals.icu kept it intact.
+    print("\n   What Intervals.icu stored for the open workout:")
+    stored = by_external_id[open_external_id].get("description") or ""
+    for line in stored.splitlines():
+        log_info(f"| {line}")
+    if stored.strip() == sent_descriptions[open_external_id].strip():
+        log_ok("stored description matches what was sent - open syntax accepted verbatim")
+    else:
+        log_info(
+            "stored description differs from what was sent. Intervals.icu rewrote it; "
+            "open the workout in the UI to see how the step was interpreted."
+        )
+    log_info(
+        "Confirm on the watch: the warm-up should wait for the lap button. "
+        "If it arrives with a fixed time instead, set INTERVALS_OPEN_STEP_STYLE=nominal "
+        "and report what the UI shows."
+    )
 
     if keep:
-        print(f"\n--keep given: leaving {external_id} on the calendar. Delete it yourself.")
+        print(f"\n--keep given: leaving {sorted(specs)} on the calendar. Delete them yourself.")
         return 0
 
-    # 4. Delete it.
-    print("\n4. Deleting the workout")
+    # 4. Delete them.
+    print("\n4. Deleting the workouts")
     try:
-        await client.bulk_delete_events([{"external_id": external_id}])
+        await client.bulk_delete_events([{"external_id": key} for key in specs])
     except IntervalsError as exc:
         log_fail(str(exc))
         return 1
     log_ok("delete accepted")
 
-    # 5. Verify it is gone.
-    print("\n5. Verifying the workout is gone")
+    # 5. Verify they are gone.
+    print("\n5. Verifying the workouts are gone")
     try:
-        events = await client.list_events(oldest=day, newest=day, category="WORKOUT")
+        remaining = await client.list_events(oldest=day, newest=day, category="WORKOUT")
     except IntervalsError as exc:
         log_fail(str(exc))
         return 1
-    if any(item.get("external_id") == external_id for item in events):
-        log_fail(f"workout {external_id} is still on the calendar. Delete it manually.")
+    leftovers = [
+        item.get("external_id") for item in remaining if item.get("external_id") in specs
+    ]
+    if leftovers:
+        log_fail(f"still on the calendar: {leftovers}. Delete them manually.")
         return 1
     log_ok("calendar is clean")
 

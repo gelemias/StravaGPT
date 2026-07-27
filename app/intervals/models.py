@@ -11,6 +11,11 @@ from app.intervals.errors import IntervalsValidationError
 
 StepType = Literal["warmup", "cooldown", "interval", "work", "steady", "recovery", "rest"]
 
+# Only these may be "open": no duration and no distance, so the athlete ends the
+# step with the lap button on the watch. Every other type still needs a length,
+# otherwise the workout has no defined structure.
+OPEN_STEP_TYPES = frozenset({"warmup", "cooldown"})
+
 TargetType = Literal["pace", "hr"]
 
 # Intervals.icu activity types that make sense for a planned workout. Unknown
@@ -37,7 +42,11 @@ class SimpleStep(BaseModel):
 
     duration: str | int | float | None = Field(
         default=None,
-        description="Time-based duration, for example '15min', '90s', '1h30m' or '2:30'.",
+        description=(
+            "Time-based duration, for example '15min', '90s', '1h30m' or '2:30'. "
+            "Omit both duration and distance on a warmup/cooldown to leave the step "
+            "open, ending when the athlete presses the lap button."
+        ),
     )
     distance: str | int | float | None = Field(
         default=None,
@@ -55,6 +64,20 @@ class SimpleStep(BaseModel):
         default=None,
         description="Optional free text appended to the step line, for example 'Warmup'.",
     )
+
+    def model_post_init(self, _context: object) -> None:
+        # Reached only for the work/recovery blocks of an interval, which always
+        # need a length. StepSpec overrides this with its own richer rules.
+        if self.duration is None and self.distance is None:
+            raise ValueError(
+                "an interval 'work' or 'recovery' block needs either 'duration' "
+                "or 'distance'. Only a top-level warmup or cooldown may be left "
+                "open for the lap button."
+            )
+        if self.duration is not None and self.distance is not None:
+            raise ValueError(
+                "an interval block has both 'duration' and 'distance'. Use exactly one."
+            )
 
 
 class StepSpec(SimpleStep):
@@ -81,6 +104,15 @@ class StepSpec(SimpleStep):
     def _normalize_type(cls, value: str) -> str:
         return value.lower()
 
+    @property
+    def is_open(self) -> bool:
+        """True when the athlete ends this step with the lap button."""
+        return (
+            self.duration is None
+            and self.distance is None
+            and self.type in OPEN_STEP_TYPES
+        )
+
     def model_post_init(self, _context: object) -> None:
         if self.type == "interval":
             if self.work is None:
@@ -99,9 +131,14 @@ class StepSpec(SimpleStep):
                     f"type='{self.type}' must not set 'work' or 'recovery'; "
                     "use type='interval' for repeated blocks."
                 )
-            if self.duration is None and self.distance is None:
+            if (
+                self.duration is None
+                and self.distance is None
+                and self.type not in OPEN_STEP_TYPES
+            ):
                 raise ValueError(
-                    f"type='{self.type}' needs either 'duration' or 'distance'."
+                    f"type='{self.type}' needs either 'duration' or 'distance'. "
+                    f"Only {sorted(OPEN_STEP_TYPES)} may be left open for the lap button."
                 )
             if self.duration is not None and self.distance is not None:
                 raise ValueError(
