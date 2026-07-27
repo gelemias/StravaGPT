@@ -130,7 +130,8 @@ becomes
   `recovery`, `rest`. Only `interval` takes `repeat`/`work`/`recovery`; every
   other type takes exactly one of `duration` or `distance`, except for open
   warm-ups and cool-downs below.
-- `notes` — optional free text appended after the steps.
+- `notes` — optional free text appended after the steps, per workout. See the
+  warning below: this text lands in the same field Intervals.icu parses.
 - `moving_time` — optional override, in seconds, of the estimated duration.
 
 ### Durations, distances and targets
@@ -150,6 +151,21 @@ Names resolve to a percentage of threshold, and the mapping differs per target
 type (`easy` is `70%` of threshold pace but `68%` of LTHR). Those percentages are
 **heuristics**: verify the first week against how you actually train, and tune
 them in `PACE_ALIASES` / `HR_ALIASES` in `app/intervals/workout_dsl.py`.
+
+### Notes are not inert
+
+`notes` is appended to `description`, which is the same field Intervals.icu
+parses into workout steps. Free text there is live: a probe with
+`- 2km 5:00/km` in the notes added a real 600-second step to the workout, and a
+line that is just `3x` becomes a repeat header for whatever follows it.
+
+Notes are therefore sanitised before being appended — a leading `-` becomes `•`,
+a bare repeat header is wrapped in parentheses — and every rewrite is reported in
+the tool's `warnings`. Ordinary prose, including inner hyphens such as
+`Ritmo 4:00-4:05`, passes through untouched.
+
+If you want a note that can never affect the workout, put it on the calendar as
+a separate `NOTE`-category event instead of attaching it to the workout.
 
 ### Two units traps in the Intervals.icu syntax
 

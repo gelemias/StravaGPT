@@ -413,6 +413,43 @@ def assert_target_matches_workout(target: Target, target_type: str, where: str) 
 # --------------------------------------------------------------------------
 
 
+_NOTE_STEP_LINE = re.compile(r"^\s*-\s*")
+_NOTE_REPEAT_LINE = re.compile(r"^\s*(\d+)\s*x\s*$", re.IGNORECASE)
+
+
+def sanitize_notes(notes: str, *, where: str = "notes") -> tuple[str, list[str]]:
+    """Make free text safe to append to the description.
+
+    ``description`` is the same field Intervals.icu parses into steps, so free
+    text is not inert. A note line starting with "-" becomes a workout step: a
+    probe with "- 2km 5:00/km" in the notes added a real 600-second step to the
+    workout. A line that is just "3x" becomes a repeat header for whatever
+    follows.
+
+    Neutralised lines are reported so the caller can see the text was changed.
+    """
+    lines: list[str] = []
+    warnings: list[str] = []
+
+    for raw in notes.splitlines():
+        line = raw.rstrip()
+        if _NOTE_STEP_LINE.match(line):
+            line = _NOTE_STEP_LINE.sub("• ", line, count=1)
+            warnings.append(
+                f"{where}: a note line started with '-', which Intervals.icu would parse "
+                f"as a workout step. Rewritten as {line.strip()!r}."
+            )
+        elif _NOTE_REPEAT_LINE.match(line):
+            line = f"({line.strip()})"
+            warnings.append(
+                f"{where}: a note line was just a repeat header, which Intervals.icu would "
+                f"apply to the following steps. Rewritten as {line!r}."
+            )
+        lines.append(line)
+
+    return "\n".join(lines).strip(), warnings
+
+
 @dataclass
 class RenderedWorkout:
     description: str
@@ -638,7 +675,9 @@ def render_workout(
 
     description = "\n\n".join("\n".join(group) for group in groups)
     if spec.notes:
-        description = f"{description}\n\n{spec.notes}".strip()
+        safe_notes, note_warnings = sanitize_notes(spec.notes, where=f"workout '{spec.external_id}'")
+        warnings.extend(note_warnings)
+        description = f"{description}\n\n{safe_notes}".strip()
 
     if open_steps and spec.moving_time is None:
         warnings.append(

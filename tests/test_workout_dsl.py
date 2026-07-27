@@ -11,6 +11,7 @@ from app.intervals.workout_dsl import (
     parse_duration,
     render_workout,
     resolve_target,
+    sanitize_notes,
 )
 
 
@@ -459,6 +460,54 @@ def test_unknown_open_step_style_is_rejected():
         render_workout(_open_spec(), open_step_style="whatever")
 
     assert "unknown open step style" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# Notes
+# --------------------------------------------------------------------------
+
+
+def _noted(notes: str) -> WorkoutSpec:
+    return WorkoutSpec(
+        date="2026-07-29",
+        name="Noted",
+        target_type="pace",
+        external_id="noted",
+        notes=notes,
+        steps=[{"type": "work", "duration": "30min", "target": "easy"}],
+    )
+
+
+def test_plain_notes_pass_through_unchanged():
+    rendered = render_workout(_noted("Hidrátate antes de salir.\nPista mojada."))
+
+    assert rendered.description == (
+        "- 30m 70% Pace\n\nHidrátate antes de salir.\nPista mojada."
+    )
+    assert rendered.warnings == []
+
+
+def test_a_note_line_starting_with_a_dash_would_become_a_step():
+    """Regression: "- 2km 5:00/km" in notes added a real 600-second step."""
+    rendered = render_workout(_noted("- 2km 5:00/km Pace"))
+
+    assert "- 2km" not in rendered.description
+    assert rendered.description.endswith("• 2km 5:00/km Pace")
+    assert any("would parse" in warning for warning in rendered.warnings)
+
+
+def test_a_note_line_that_is_a_repeat_header_is_neutralised():
+    rendered = render_workout(_noted("3x"))
+
+    assert rendered.description.endswith("(3x)")
+    assert any("repeat header" in warning for warning in rendered.warnings)
+
+
+def test_sanitize_notes_leaves_inner_dashes_alone():
+    text, warnings = sanitize_notes("Ritmo 4:00-4:05 en la parte final")
+
+    assert text == "Ritmo 4:00-4:05 en la parte final"
+    assert warnings == []
 
 
 def test_custom_label_is_appended_to_the_step_line():
