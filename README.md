@@ -75,6 +75,8 @@ python scripts/smoke_intervals.py --date 2026-07-29 --keep   # leave it on the c
 | `INTERVALS_API_KEY` | – | **Required.** Personal API key. |
 | `INTERVALS_ATHLETE_ID` | `0` | `0` means "the athlete who owns the key". |
 | `INTERVALS_MAX_FUTURE_DAYS` | `7` | How far ahead `push_workouts` accepts dates. |
+| `INTERVALS_OPEN_STEP_STYLE` | `no_duration` | How to render an open warm-up/cool-down. `nominal` is the fallback that emits a timed step instead. |
+| `INTERVALS_OPEN_STEP_NOMINAL_SECONDS` | `600` | What an open step contributes to the `moving_time` estimate. |
 | `MCP_API_KEY` | – | Protects `/mcp`. Sent as `X-API-Key` or `Authorization: Bearer`. |
 | `MCP_PATH_TOKEN` | – | Serves MCP at `/mcp/<token>` instead, for clients that cannot send headers. |
 | `PUBLIC_BASE_URL` | – | **Required when deployed.** See the note on HTTP 421 below. |
@@ -126,7 +128,8 @@ becomes
   normalized, unknown values are passed through.
 - `steps[].type` — `warmup`, `cooldown`, `interval`, `work`, `steady`,
   `recovery`, `rest`. Only `interval` takes `repeat`/`work`/`recovery`; every
-  other type takes exactly one of `duration` or `distance`.
+  other type takes exactly one of `duration` or `distance`, except for open
+  warm-ups and cool-downs below.
 - `notes` — optional free text appended after the steps.
 - `moving_time` — optional override, in seconds, of the estimated duration.
 
@@ -146,6 +149,44 @@ Names resolve to a percentage of threshold, and the mapping differs per target
 type (`easy` is `70%` of threshold pace but `68%` of LTHR). Those percentages are
 **heuristics**: verify the first week against how you actually train, and tune
 them in `PACE_ALIASES` / `HR_ALIASES` in `app/intervals/workout_dsl.py`.
+
+### Open warm-ups and cool-downs (lap button)
+
+A `warmup` or `cooldown` with **neither** `duration` nor `distance` is an *open*
+step: it runs until the athlete presses the lap button on the watch.
+
+```json
+{"type": "warmup", "target": "5:10-5:30/km"}
+```
+
+renders with no length at all:
+
+```text
+- 5:10-5:30/km Warmup
+```
+
+Every other step type still requires a length, including the `work` and
+`recovery` blocks of an `interval` — an open step only makes sense at the edges
+of a workout.
+
+Because an open step has no defined length, it contributes
+`INTERVALS_OPEN_STEP_NOMINAL_SECONDS` (default 10 minutes) to the estimated
+`moving_time`, and the response says so. Set the workout's `moving_time`
+explicitly to override.
+
+> **Verify this one against your own watch.** Intervals.icu documents an Open
+> step whose "duration will be ignored by your device", but its plain-text
+> workout format has no documented syntax for it, and the syntax could not be
+> confirmed against the API while this was written. Run
+> `scripts/smoke_intervals.py`: it pushes a workout with an open warm-up, reads
+> the event back, and prints exactly what Intervals.icu stored. If the step
+> reaches the watch with a fixed time instead of waiting for the lap press, fall
+> back to `INTERVALS_OPEN_STEP_STYLE=nominal`, which emits an ordinary timed step
+> and warns that it is not open.
+>
+> Note that Runna's open warm-ups reach COROS through Runna's **direct** COROS
+> integration, not through Intervals.icu, so they are not evidence that this
+> path works.
 
 `moving_time` is estimated from the steps: time-based steps count directly, and
 distance-based steps are converted using the step's absolute pace, or your

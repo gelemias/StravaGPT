@@ -47,6 +47,10 @@ Workflow for pushing a training week:
 3. Call push_workouts for real. It upserts on external_id, so re-pushing the
    same external_id updates the workout instead of creating a duplicate.
 
+A warmup or cooldown with neither "duration" nor "distance" is an open step: it
+runs until the athlete presses the lap button. Every other step type still needs
+a length.
+
 Two hard constraints come from the COROS watch sync, not from Intervals.icu:
 - Only about 7 days of planned workouts transfer to the watch, so push a rolling
   week rather than a whole training block.
@@ -139,6 +143,8 @@ async def push_workouts(
             rendered = render_workout(
                 spec,
                 threshold_pace_seconds_per_km=threshold_paces.get(spec.sport),
+                open_step_style=settings.open_step_style,
+                open_step_nominal_seconds=settings.open_step_nominal_seconds,
             )
             warnings.extend(rendered.warnings)
             events.append(build_event(spec, rendered.description, rendered.moving_time, rendered.target))
@@ -151,6 +157,7 @@ async def push_workouts(
                     "target": rendered.target,
                     "moving_time_seconds": rendered.moving_time,
                     "moving_time_pretty": _pretty_seconds(rendered.moving_time),
+                    "open_steps": rendered.open_steps,
                     "description": rendered.description,
                 }
             )

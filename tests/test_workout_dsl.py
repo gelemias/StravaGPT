@@ -326,6 +326,100 @@ def test_notes_are_appended_after_the_steps():
     )
 
 
+# --------------------------------------------------------------------------
+# Open (lap-button) warm-up and cool-down
+# --------------------------------------------------------------------------
+
+
+def _open_spec(**overrides) -> WorkoutSpec:
+    payload = {
+        "date": "2026-07-29",
+        "name": "Open warmup",
+        "target_type": "pace",
+        "external_id": "open",
+        "steps": [
+            {"type": "warmup", "target": "easy"},
+            {"type": "interval", "repeat": 3,
+             "work": {"distance": "1000m", "target": "4:00/km"},
+             "recovery": {"duration": "2min", "target": "easy"}},
+            {"type": "cooldown", "target": "easy"},
+        ],
+    }
+    payload.update(overrides)
+    return WorkoutSpec(**payload)
+
+
+def test_open_warmup_and_cooldown_render_without_a_length():
+    rendered = render_workout(_open_spec())
+
+    assert rendered.description == (
+        "- 70% Warmup\n"
+        "\n"
+        "3x\n"
+        "- 1000m 4:00/km\n"
+        "- 2m 70%\n"
+        "\n"
+        "- 70% Cooldown"
+    )
+    assert rendered.open_steps == 2
+
+
+def test_open_steps_contribute_a_nominal_duration_to_moving_time():
+    rendered = render_workout(_open_spec(), open_step_nominal_seconds=600)
+
+    # 600 open warmup + 3 * (240 work + 120 recovery) + 600 open cooldown
+    assert rendered.moving_time == 2280
+    assert any("open step(s) counted as 10m" in warning for warning in rendered.warnings)
+
+
+def test_explicit_moving_time_silences_the_open_step_estimate_warning():
+    rendered = render_workout(_open_spec(moving_time=3000))
+
+    assert rendered.moving_time == 3000
+    assert not any("open step(s) counted" in warning for warning in rendered.warnings)
+
+
+def test_nominal_style_emits_a_timed_step_and_warns_it_is_not_open():
+    rendered = render_workout(_open_spec(), open_step_style="nominal")
+
+    assert rendered.description.startswith("- 10m 70% Warmup")
+    assert any("will NOT reach the watch as an open" in w for w in rendered.warnings)
+
+
+def test_open_step_keeps_a_custom_label_and_target():
+    spec = _open_spec(
+        steps=[{"type": "warmup", "target": "5:30-5:50/km", "label": "Open WU"}]
+    )
+
+    assert render_workout(spec).description == "- 5:30-5:50/km Open WU"
+
+
+def test_open_step_defaults_to_the_easy_target_when_none_is_given():
+    spec = _open_spec(steps=[{"type": "warmup"}])
+
+    assert render_workout(spec).description == "- 70% Warmup"
+
+
+def test_open_step_still_enforces_the_pace_hr_rule():
+    spec = _open_spec(
+        target_type="pace",
+        steps=[{"type": "warmup", "target": "130bpm"}],
+    )
+
+    with pytest.raises(IntervalsValidationError) as excinfo:
+        render_workout(spec)
+
+    assert "130bpm" in str(excinfo.value)
+    assert "target_type='pace'" in str(excinfo.value)
+
+
+def test_unknown_open_step_style_is_rejected():
+    with pytest.raises(IntervalsValidationError) as excinfo:
+        render_workout(_open_spec(), open_step_style="whatever")
+
+    assert "unknown open step style" in str(excinfo.value)
+
+
 def test_custom_label_is_appended_to_the_step_line():
     spec = WorkoutSpec(
         date="2026-07-29",

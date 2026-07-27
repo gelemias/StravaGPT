@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,20 @@ class IntervalsSettings(BaseSettings):
 
     # COROS only accepts about a week of planned workouts in advance.
     max_future_days: int = Field(default=7, ge=0, le=365, alias="INTERVALS_MAX_FUTURE_DAYS")
+
+    # How to render a warm-up/cool-down left open for the lap button.
+    #   "no_duration" emits the step with no time or distance at all.
+    #   "nominal"     emits a normal timed step, as a fallback if Intervals.icu
+    #                 refuses to parse a step without a length.
+    open_step_style: Literal["no_duration", "nominal"] = Field(
+        default="no_duration",
+        alias="INTERVALS_OPEN_STEP_STYLE",
+    )
+    open_step_nominal_seconds: int = Field(
+        default=600,
+        ge=1,
+        alias="INTERVALS_OPEN_STEP_NOMINAL_SECONDS",
+    )
 
     # Optional protection for the public /mcp endpoint.
     mcp_api_key: str | None = Field(default=None, alias="MCP_API_KEY")
