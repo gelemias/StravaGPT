@@ -115,19 +115,52 @@ def require_chatgpt_api_key(
         )
 
 
+def _redact(text: str, settings: Settings) -> str:
+    """Strip anything credential-shaped before putting text in a public response."""
+    for secret in (settings.turso_auth_token, settings.chatgpt_api_key):
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    return text[:300]
+
+
+def _storage_health(storage: Storage, settings: Settings) -> dict[str, object]:
+    """Probe the legacy Strava database without letting it fail the health check.
+
+    Render restarts any instance whose health check answers 500. Turso being
+    briefly unreachable used to do exactly that, which took the MCP endpoint down
+    with it even though MCP never touches the database. A storage outage is now
+    reported as a degraded component instead of an unhealthy service.
+    """
+    try:
+        storage.init_db()
+        return {"ok": True, "authorized": storage.get_token() is not None, "error": None}
+    except Exception as exc:  # noqa: BLE001 - health checks must not raise.
+        logger.warning("Storage health probe failed: %s", type(exc).__name__)
+        return {
+            "ok": False,
+            "authorized": None,
+            "error": _redact(f"{type(exc).__name__}: {exc}", settings),
+        }
+
+
 @app.get("/health")
 def health(
     settings: Annotated[Settings, Depends(get_settings)],
     storage: Annotated[Storage, Depends(get_storage)],
 ) -> dict[str, object]:
-    storage.init_db()
     intervals = get_intervals_settings()
+    storage_status = _storage_health(storage, settings)
     return {
+        # True whenever the process is up and the MCP endpoint can serve. The
+        # legacy Strava database is reported separately under storage_ok, so a
+        # Turso outage no longer gets the instance restarted.
         "ok": True,
         "storage_backend": settings.storage_backend,
+        "storage_ok": storage_status["ok"],
+        "storage_error": storage_status["error"],
         "database_path": settings.database_path if settings.storage_backend == "sqlite" else None,
         "strava_configured": settings.strava_configured,
-        "authorized": storage.get_token() is not None,
+        "authorized": storage_status["authorized"],
         "sync_on_startup": settings.sync_on_startup,
         "chatgpt_api_key_required": bool(settings.chatgpt_api_key),
         "mcp": {

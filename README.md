@@ -231,6 +231,14 @@ MCP_API_KEY=your-long-random-secret
 PUBLIC_BASE_URL=https://your-service-name.onrender.com
 ```
 
+### If Render reports "health check failed with status code 500"
+
+`GET /health` also probes the legacy Strava database. A storage outage is
+reported as `storage_ok: false` with a redacted `storage_error`, and the
+endpoint still answers 200, because Render restarts any instance whose health
+check fails — which would drop the MCP endpoint even though MCP never touches
+the database. If you see this alert on a build older than that change, redeploy.
+
 ### If every request answers HTTP 421 Misdirected Request
 
 The MCP SDK blocks unknown `Host` headers to prevent DNS rebinding attacks, and
