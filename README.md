@@ -137,7 +137,8 @@ becomes
 
 - **Duration**: `15min`, `15m`, `90s`, `1h30m`, `2:30`, `1:00:00`. A bare number
   is rejected on purpose, because `"15"` is ambiguous.
-- **Distance**: `2000m`, `2km`, `5k`, `1mi`.
+- **Distance**: `2000m`, `2km`, `5k`, `1mi`. These are *input* forms; the
+  generated description always uses `km` or `mtr`, never a bare `m` — see below.
 - **Target**, any of:
   - a percentage of threshold: `75%`, `95-100%` (valid for both target types),
   - an absolute pace: `4:00/km`, `4:00-4:02/km`, `6:26/mi`,
@@ -149,6 +150,26 @@ Names resolve to a percentage of threshold, and the mapping differs per target
 type (`easy` is `70%` of threshold pace but `68%` of LTHR). Those percentages are
 **heuristics**: verify the first week against how you actually train, and tune
 them in `PACE_ALIASES` / `HR_ALIASES` in `app/intervals/workout_dsl.py`.
+
+### Two units traps in the Intervals.icu syntax
+
+Both were found the hard way, by reading a pushed workout back off the watch.
+
+**`m` means minutes, not metres.** `- 16000m 70%` parses as 16000 *minutes*: that
+workout came back from the API with `moving_time` 1320000 and the watch showed
+366:40:00. The generated description therefore always writes distances as `km`
+(whole kilometres) or `mtr`, both confirmed against the API — `- 2km 5:00/km`
+read back as exactly 600 seconds.
+
+**A bare percentage means power.** `- 15m 70%` is read as 70% of FTP. On a run
+that is wrong, and with no FTP configured it reached the watch as
+`Power | 10-10 W`. Percentages are therefore always qualified: `70% Pace` for a
+pace workout, `70% HR` for a heart-rate one. Absolute paces such as `4:15/km`
+need no qualifier — verified.
+
+If a step's target matters to you, prefer an absolute pace over a percentage.
+It is unambiguous and it does not depend on your Sport Settings threshold being
+up to date.
 
 ### Open warm-ups and cool-downs (lap button)
 

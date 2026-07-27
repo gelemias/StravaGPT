@@ -130,7 +130,7 @@ def test_percentage_targets_are_valid_for_both_target_types():
         rendered = render_workout(
             spec(target_type=target_type, steps=[{"type": "work", "duration": "20min", "target": "90%"}])
         )
-        assert rendered.description == "- 20m 90%"
+        assert rendered.description == "- 20m 90% " + ("Pace" if target_type == "pace" else "HR")
 
 
 def test_target_type_must_be_pace_or_hr():
@@ -237,7 +237,7 @@ def test_build_event_payload_shape():
         "start_date_local": "2026-07-27T00:00:00",
         "type": "Run",
         "name": "Easy run",
-        "description": "- 30m 70%",
+        "description": "- 30m 70% Pace",
         "moving_time": 1800,
         "target": "PACE",
         "external_id": "w1-mon",
