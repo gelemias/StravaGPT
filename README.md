@@ -29,8 +29,8 @@ watch. Configure these once, in Intervals.icu itself — no code involved:
 
 1. **Settings → Connections**: link COROS and enable **Upload planned workouts**.
 2. **Settings → Sport Settings**: set your **threshold pace** for Run. Without it
-   COROS cannot build pace targets on the watch, and `moving_time` estimates for
-   distance-based steps fall back to a rough default.
+   `push_workouts` fails: the server cannot convert absolute pace to `% Pace`,
+   Intervals.icu cannot resolve pace steps, and training load stays empty.
 
 ## Setup
 
@@ -60,8 +60,8 @@ uvicorn app.main:app --reload
 The MCP endpoint is now at `http://localhost:8000/mcp`.
 
 4. Verify the whole chain with the smoke test before loading a real week. It
-   pushes ONE throwaway workout, checks it landed, deletes it and checks it is
-   gone:
+   pushes throwaway workouts, reads each event with `resolve=true`, requires
+   pace steps resolved to m/s and `icu_training_load > 0`, then deletes them:
 
 ```bash
 python scripts/smoke_intervals.py
@@ -106,17 +106,23 @@ You write this; the server converts it to the native Intervals.icu syntax.
 }
 ```
 
-becomes
+with a `4:00/km` threshold pace becomes
 
 ```text
-- 15m 70% Warmup
+Warmup
+- 15m 70% Pace
 
-4x
-- 2000m 4:00-4:02/km
-- 2m 70%
+Main Set 4x
+- 2km 99-100% Pace
+- 2m 70% Pace
 
-- 10m 70% Cooldown
+Cooldown
+- 10m 70% Pace
 ```
+
+Only this text is sent as the event's `description`. Do not send a separate
+`workout_doc`: Intervals.icu parses `description` and generates its structured
+steps automatically.
 
 ### Fields
 
@@ -147,10 +153,13 @@ becomes
   - a name: `rest`, `recovery`, `easy`, `endurance`, `steady`, `marathon`,
     `tempo`, `threshold`, `interval`, `vo2max`, `repetition`, `sprint`.
 
-Names resolve to a percentage of threshold, and the mapping differs per target
-type (`easy` is `70%` of threshold pace but `68%` of LTHR). Those percentages are
-**heuristics**: verify the first week against how you actually train, and tune
-them in `PACE_ALIASES` / `HR_ALIASES` in `app/intervals/workout_dsl.py`.
+For pace workouts every target is emitted as `% Pace`. Absolute min/km or
+min/mile targets are converted using the athlete's `threshold_pace` from Sport
+Settings (`threshold pace / target pace × 100`). Names resolve to a percentage
+of threshold, and the mapping differs per target type (`easy` is `70%` of
+threshold pace but `68%` of LTHR). Those percentages are **heuristics**: verify
+the first week against how you actually train, and tune them in `PACE_ALIASES` /
+`HR_ALIASES` in `app/intervals/workout_dsl.py`.
 
 ### Notes are not inert
 
@@ -180,12 +189,9 @@ read back as exactly 600 seconds.
 **A bare percentage means power.** `- 15m 70%` is read as 70% of FTP. On a run
 that is wrong, and with no FTP configured it reached the watch as
 `Power | 10-10 W`. Percentages are therefore always qualified: `70% Pace` for a
-pace workout, `70% HR` for a heart-rate one. Absolute paces such as `4:15/km`
-need no qualifier — verified.
-
-If a step's target matters to you, prefer an absolute pace over a percentage.
-It is unambiguous and it does not depend on your Sport Settings threshold being
-up to date.
+pace workout and `70% HR` for a heart-rate one. Even absolute pace input such as
+`4:15/km` is converted to `% Pace`, which is the form that reliably creates
+COROS sets and lets Intervals.icu calculate training load.
 
 ### Open warm-ups and cool-downs (lap button)
 
@@ -196,10 +202,11 @@ step: it runs until the athlete presses the lap button on the watch.
 {"type": "warmup", "target": "5:10-5:30/km"}
 ```
 
-renders with no length at all:
+with a `4:00/km` threshold pace renders with no length at all:
 
 ```text
-- 5:10-5:30/km Warmup
+Warmup
+- 73-77% Pace
 ```
 
 Every other step type still requires a length, including the `work` and
@@ -226,9 +233,9 @@ explicitly to override.
 > path works.
 
 `moving_time` is estimated from the steps: time-based steps count directly, and
-distance-based steps are converted using the step's absolute pace, or your
-threshold pace from Sport Settings, or a `5:00/km` fallback (which adds a
-warning to the response).
+distance-based pace steps use the target percentage and threshold pace. Pace
+workouts are rejected if Sport Settings has no threshold pace; there is no
+fallback that could silently create a zero-set workout.
 
 ## Domain constraints, enforced
 

@@ -242,9 +242,18 @@ def test_push_workouts_schema_documents_the_workout_format(client):
     assert "allow_beyond_coros_window" in schema["properties"]
 
 
-def test_push_workouts_dry_run_renders_without_calling_the_api(client):
+def test_push_workouts_dry_run_renders_without_calling_the_api(client, monkeypatch):
     from datetime import date, timedelta
 
+    from app.intervals.client import IntervalsClient
+
+    async def fake_threshold_paces(self, sports):
+        assert sports == ["Run"]
+        return {"Run": 240.0}
+
+    monkeypatch.setattr(
+        IntervalsClient, "require_threshold_paces", fake_threshold_paces
+    )
     target_date = (date.today() + timedelta(days=2)).isoformat()
 
     payload = tool_payload(
@@ -282,8 +291,54 @@ def test_push_workouts_dry_run_renders_without_calling_the_api(client):
     assert workout["external_id"] == "w2-wed"
     assert workout["target"] == "PACE"
     assert workout["description"] == (
-        "- 15m 70% Pace Warmup\n\n4x\n- 2km 4:00-4:02/km\n- 2m 70% Pace\n\n- 10m 70% Pace Cooldown"
+        "Warmup\n"
+        "- 15m 70% Pace\n\n"
+        "Main Set 4x\n"
+        "- 2km 99-100% Pace\n"
+        "- 2m 70% Pace\n\n"
+        "Cooldown\n"
+        "- 10m 70% Pace"
     )
+
+
+def test_push_workouts_without_threshold_pace_fails_clearly(client, monkeypatch):
+    from datetime import date, timedelta
+
+    from app.intervals.client import IntervalsClient
+    from app.intervals.errors import IntervalsValidationError
+
+    async def missing_threshold(self, sports):
+        raise IntervalsValidationError(
+            "Cannot push pace workout(s): no threshold_pace is configured for 'Run'. "
+            "Configure threshold pace first; without it min/km cannot become '% Pace'."
+        )
+
+    monkeypatch.setattr(
+        IntervalsClient, "require_threshold_paces", missing_threshold
+    )
+    result = call_tool(
+        client,
+        "push_workouts",
+        {
+            "dry_run": True,
+            "workouts": [
+                {
+                    "date": (date.today() + timedelta(days=1)).isoformat(),
+                    "sport": "Run",
+                    "name": "Missing threshold",
+                    "target_type": "pace",
+                    "external_id": "missing-threshold",
+                    "steps": [
+                        {"type": "work", "duration": "20min", "target": "4:15/km"}
+                    ],
+                }
+            ],
+        },
+    )
+
+    text = json.dumps(result)
+    assert "threshold_pace" in text
+    assert "% Pace" in text
 
 
 def test_push_workouts_beyond_the_coros_window_returns_a_readable_error(client):

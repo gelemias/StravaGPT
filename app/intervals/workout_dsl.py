@@ -1,21 +1,18 @@
 """Convert a friendly workout JSON into the native Intervals.icu step syntax.
 
 The native format is a plain-text ``description`` where every step is a line
-starting with a dash, durations are either times (``15m``) or distances
-(``1000m``), and repeats are declared with ``Nx`` on their own line before the
-block to repeat::
+starting with a dash. Section headers make Intervals.icu's parser reliably
+create sets, and pace targets are always percentages of threshold pace::
 
-    - 15m 55% Warmup
+    Warmup
+    - 15m 70% Pace
 
-    3x
-    - 1m 150%
-    - 1m 50%
+    Main Set 3x
+    - 1m 100% Pace
+    - 1m 65% Pace
 
-    - 5m 50%
-    - 5m 120%
-    - 15m 55%
-
-Blank lines separate top-level groups; consecutive plain steps stay together.
+    Cooldown
+    - 10m 65% Pace
 """
 
 from __future__ import annotations
@@ -67,8 +64,9 @@ HR_ALIASES: dict[str, str] = {
 
 ALIAS_TABLES = {"pace": PACE_ALIASES, "hr": HR_ALIASES}
 
-# Fallback used to estimate moving_time for distance-based steps when neither an
-# absolute pace target nor a threshold pace from sport-settings is available.
+# Fallback used to estimate moving_time for non-pace workouts when no pace is
+# available. Pace workouts are rejected by the MCP before rendering unless the
+# athlete has configured threshold_pace.
 FALLBACK_THRESHOLD_PACE_SECONDS_PER_KM = 300.0
 
 # An open step has no length, so it contributes a nominal amount to moving_time.
@@ -90,12 +88,6 @@ DEFAULT_STEP_INTENSITY = {
     "work": "steady",
     "interval": "threshold",
 }
-
-DEFAULT_STEP_LABEL = {
-    "warmup": "Warmup",
-    "cooldown": "Cooldown",
-}
-
 
 # --------------------------------------------------------------------------
 # Duration / distance parsing
@@ -294,6 +286,7 @@ class Target:
     kind: str
     percent: float | None = None
     pace_seconds_per_km: float | None = None
+    pace_range_seconds_per_km: tuple[float, float] | None = None
     source: str = ""
 
 
@@ -328,6 +321,7 @@ def resolve_target(raw: str, target_type: str, *, where: str = "target") -> Targ
             kind=resolved.kind,
             percent=resolved.percent,
             pace_seconds_per_km=resolved.pace_seconds_per_km,
+            pace_range_seconds_per_km=resolved.pace_range_seconds_per_km,
             source=text,
         )
 
@@ -345,6 +339,7 @@ def resolve_target(raw: str, target_type: str, *, where: str = "target") -> Targ
             text=rendered,
             kind=PACE_KIND,
             pace_seconds_per_km=mid_seconds_per_km,
+            pace_range_seconds_per_km=(low * per_km, high * per_km),
             source=text,
         )
 
@@ -406,6 +401,77 @@ def assert_target_matches_workout(target: Target, target_type: str, where: str) 
             "of the first one, so a workout must use heart-rate targets only. "
             "Split it into two workouts or switch target_type to 'pace'."
         )
+
+
+def validate_workout_targets(spec: WorkoutSpec) -> None:
+    """Validate every target without needing athlete sport settings."""
+    for index, step in enumerate(spec.steps):
+        position = f"workout '{spec.external_id}' step {index + 1} ({step.type})"
+        if step.type == "interval":
+            parts = (
+                ("work", step.work, "interval"),
+                ("recovery", step.recovery, "recovery"),
+            )
+        else:
+            parts = (("", step, step.type),)
+
+        for part_name, part, step_type in parts:
+            if part is None:
+                continue
+            where = f"{position} {part_name}".strip()
+            raw_target = part.target
+            if raw_target is None or str(raw_target).strip() == "":
+                raw_target = DEFAULT_STEP_INTENSITY.get(step_type, "steady")
+            target = resolve_target(raw_target, spec.target_type, where=where)
+            assert_target_matches_workout(target, spec.target_type, where)
+
+
+def absolute_pace_to_threshold_percent(
+    pace_seconds_per_km: float,
+    threshold_pace_seconds_per_km: float,
+) -> int:
+    """Convert an absolute running pace to whole percent of threshold speed.
+
+    Pace is stored as seconds per kilometre, so the speed ratio is inverted:
+    a 4:00/km target at a 4:00/km threshold is 100%, while 4:15/km is 94%.
+    """
+    if pace_seconds_per_km <= 0 or threshold_pace_seconds_per_km <= 0:
+        raise IntervalsValidationError(
+            "Absolute pace and threshold_pace must both be greater than zero."
+        )
+    return int(round(100.0 * threshold_pace_seconds_per_km / pace_seconds_per_km))
+
+
+def _description_target(
+    target: Target,
+    *,
+    threshold_pace_seconds_per_km: float | None,
+    where: str,
+) -> str:
+    """Return the target token Intervals.icu should parse from description."""
+    if target.kind != PACE_KIND or target.pace_seconds_per_km is None:
+        return target.text
+
+    if threshold_pace_seconds_per_km is None:
+        raise IntervalsValidationError(
+            f"{where}: cannot convert absolute pace {target.source!r} to '% Pace' "
+            "because this athlete has no threshold_pace configured for the sport in "
+            "Intervals.icu Sport Settings."
+        )
+
+    endpoints = target.pace_range_seconds_per_km
+    if endpoints is None:
+        endpoints = (target.pace_seconds_per_km, target.pace_seconds_per_km)
+    if endpoints[0] is None or endpoints[1] is None:
+        raise IntervalsValidationError(f"{where}: could not resolve absolute pace.")
+
+    percentages = sorted(
+        absolute_pace_to_threshold_percent(pace, threshold_pace_seconds_per_km)
+        for pace in endpoints
+    )
+    if percentages[0] == percentages[1]:
+        return f"{percentages[0]}% Pace"
+    return f"{percentages[0]}-{percentages[1]}% Pace"
 
 
 # --------------------------------------------------------------------------
@@ -493,6 +559,7 @@ def _render_open_step_line(
     *,
     step_type: str,
     target_type: str,
+    threshold_pace_seconds_per_km: float | None,
     where: str,
     warnings: list[str],
     open_step_style: str,
@@ -517,10 +584,15 @@ def _render_open_step_line(
     target = resolve_target(raw_target, target_type, where=where)
     assert_target_matches_workout(target, target_type, where)
 
-    label = step.label or DEFAULT_STEP_LABEL.get(step_type)
+    target_text = _description_target(
+        target,
+        threshold_pace_seconds_per_km=threshold_pace_seconds_per_km,
+        where=where,
+    )
+    label = step.label
 
     if open_step_style == "nominal":
-        line = f"- {format_duration(open_step_nominal_seconds)} {target.text}"
+        line = f"- {format_duration(open_step_nominal_seconds)} {target_text}"
         warnings.append(
             f"{where}: rendered as a fixed "
             f"{format_duration(open_step_nominal_seconds)} step because "
@@ -528,7 +600,7 @@ def _render_open_step_line(
             "open lap-button step."
         )
     else:
-        line = f"- {target.text}"
+        line = f"- {target_text}"
 
     if label:
         line = f"{line} {label}"
@@ -560,6 +632,7 @@ def _render_step_line(
             step,
             step_type=step_type,
             target_type=target_type,
+            threshold_pace_seconds_per_km=threshold_pace_seconds_per_km,
             where=where,
             warnings=warnings,
             open_step_style=open_step_style,
@@ -585,9 +658,14 @@ def _render_step_line(
     target = resolve_target(raw_target, target_type, where=where)
     assert_target_matches_workout(target, target_type, where)
 
-    label = step.label or DEFAULT_STEP_LABEL.get(step_type)
+    target_text = _description_target(
+        target,
+        threshold_pace_seconds_per_km=threshold_pace_seconds_per_km,
+        where=where,
+    )
+    label = step.label
 
-    line = f"- {amount_text} {target.text}"
+    line = f"- {amount_text} {target_text}"
     if label:
         line = f"{line} {label}"
 
@@ -614,8 +692,16 @@ def render_workout(
     warnings: list[str] = []
     groups: list[list[str]] = []
     current: list[str] = []
+    current_header: str | None = None
     total_seconds = 0
     open_steps = 0
+
+    def flush_current() -> None:
+        nonlocal current, current_header
+        if current:
+            groups.append(([current_header] if current_header else []) + current)
+        current = []
+        current_header = None
 
     for index, step in enumerate(spec.steps):
         position = f"workout '{spec.external_id}' step {index + 1} ({step.type})"
@@ -625,15 +711,13 @@ def render_workout(
                 raise IntervalsValidationError(
                     f"{position}: an 'interval' step needs a 'work' block."
                 )
-            if current:
-                groups.append(current)
-                current = []
+            flush_current()
 
             repeat = step.repeat or 1
             if repeat < 1:
                 raise IntervalsValidationError(f"{position}: 'repeat' must be at least 1.")
 
-            block: list[str] = [f"{repeat}x"] if repeat > 1 else []
+            block: list[str] = [f"Main Set {repeat}x" if repeat > 1 else "Main Set"]
             block_seconds = 0
             for part_name, part, part_type in (
                 ("work", step.work, "interval"),
@@ -655,6 +739,16 @@ def render_workout(
             groups.append(block)
             total_seconds += repeat * block_seconds
         else:
+            header = (
+                "Warmup"
+                if step.type == "warmup"
+                else "Cooldown"
+                if step.type == "cooldown"
+                else "Main Set"
+            )
+            if current and current_header != header:
+                flush_current()
+            current_header = header
             line, seconds = _render_step_line(
                 step,
                 step_type=step.type,
@@ -670,8 +764,7 @@ def render_workout(
             current.append(line)
             total_seconds += seconds
 
-    if current:
-        groups.append(current)
+    flush_current()
 
     description = "\n\n".join("\n".join(group) for group in groups)
     if spec.notes:

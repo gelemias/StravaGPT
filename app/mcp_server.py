@@ -35,7 +35,7 @@ from app.intervals.models import (
     build_event,
     check_coros_window,
 )
-from app.intervals.workout_dsl import render_workout
+from app.intervals.workout_dsl import render_workout, validate_workout_targets
 
 
 logger = logging.getLogger(__name__)
@@ -125,21 +125,23 @@ async def push_workouts(
             today=date.today(),
             strict=not allow_beyond_coros_window,
         )
+        for spec in workouts:
+            validate_workout_targets(spec)
     except IntervalsError as exc:
         raise _fail(exc) from exc
 
     for problem in window_problems:
         warnings.append(f"Outside the COROS sync window: {problem}")
 
-    # Threshold pace turns distance-based steps into a moving_time estimate. It is
-    # fetched for dry runs too so the preview matches what would be written.
+    # Intervals.icu reliably builds pace steps and training load from "% Pace".
+    # Fetch threshold_pace even for dry runs so absolute min/km targets can be
+    # converted and a preview can never claim a broken workout is pushable.
     threshold_paces: dict[str, float] = {}
-    sports = sorted({spec.sport for spec in workouts})
+    pace_sports = sorted({spec.sport for spec in workouts if spec.target_type == "pace"})
     try:
-        threshold_paces, pace_warnings = await client.threshold_paces(sports)
+        threshold_paces = await client.require_threshold_paces(pace_sports)
     except IntervalsError as exc:
-        pace_warnings = [f"Could not read sport settings: {exc}"]
-    warnings.extend(pace_warnings)
+        raise _fail(exc) from exc
 
     events: list[dict[str, Any]] = []
     previews: list[dict[str, Any]] = []

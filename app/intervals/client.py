@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - fallback for environments not reinstal
     truststore = None
 
 from app.intervals.config import IntervalsSettings
-from app.intervals.errors import IntervalsAPIError
+from app.intervals.errors import IntervalsAPIError, IntervalsValidationError
 
 
 # Intervals.icu personal API keys authenticate with HTTP Basic where the
@@ -82,20 +82,49 @@ def inspect_step_targets(event: dict[str, Any]) -> dict[str, Any]:
     steps = doc.get("steps") if isinstance(doc, dict) else None
     serialized = json.dumps(doc, ensure_ascii=False).lower() if doc is not None else ""
 
+    def has_resolved_pace_mps(value: Any) -> bool:
+        if isinstance(value, dict):
+            resolved = value.get("_pace")
+            if isinstance(resolved, dict) and any(
+                isinstance(resolved.get(key), (int, float))
+                and resolved[key] > 0
+                for key in ("value", "start", "end")
+            ):
+                # Intervals.icu represents resolved pace as a private _pace
+                # object whose numeric values are metres per second.
+                return True
+            return any(has_resolved_pace_mps(item) for item in value.values())
+        if isinstance(value, list):
+            return any(has_resolved_pace_mps(item) for item in value)
+        return False
+
     load_fields = {
         key: value
         for key, value in event.items()
         if "load" in key.lower() and isinstance(value, (int, float))
     }
 
+    icu_training_load = event.get("icu_training_load")
     return {
         "has_workout_doc": doc is not None,
         "step_count": len(steps) if isinstance(steps, list) else None,
         "mentions_pace": "pace" in serialized,
-        "mentions_power": "power" in serialized or '"watts"' in serialized,
+        # Resolved workout schemas may include an unused "power" field next to
+        # pace. Only power units prove that a target actually resolved to power.
+        "mentions_power": any(
+            unit in serialized
+            for unit in ('"%ftp"', '"watts"', '"watt"', '"w"')
+        ),
+        "pace_resolved_mps": (
+            '"mps"' in serialized
+            or '"m/s"' in serialized
+            or has_resolved_pace_mps(doc)
+        ),
         "load_fields": load_fields,
-        "training_load": next(
-            (value for value in load_fields.values() if value), 0
+        "training_load": (
+            icu_training_load
+            if isinstance(icu_training_load, (int, float))
+            else 0
         ),
         "workout_doc": doc,
     }
@@ -188,14 +217,6 @@ class IntervalsClient:
             return [event for event in body if isinstance(event, dict)]
         return []
 
-    async def get_event(self, event_id: int, *, resolve: bool = True) -> Any:
-        params = {"resolve": "true"} if resolve else None
-        return await self._request(
-            "GET",
-            f"{self.settings.athlete_path}/events/{event_id}",
-            params=params,
-        )
-
     async def bulk_upsert_events(self, events: list[dict[str, Any]]) -> Any:
         return await self._request(
             "POST",
@@ -223,31 +244,26 @@ class IntervalsClient:
 
     # -- helpers ----------------------------------------------------------
 
-    async def threshold_paces(self, sports: list[str]) -> tuple[dict[str, float], list[str]]:
-        """Best-effort lookup of threshold pace per sport.
+    async def require_threshold_paces(self, sports: list[str]) -> dict[str, float]:
+        """Return threshold pace for every sport or fail with an actionable error."""
+        wanted = list(dict.fromkeys(sports))
+        if not wanted:
+            return {}
 
-        Never raises: a failure here only degrades the ``moving_time`` estimate,
-        so the reason is returned as a warning instead.
-        """
-        warnings: list[str] = []
-        if not sports:
-            return {}, warnings
-        try:
-            settings_body = await self.get_sport_settings()
-        except IntervalsAPIError as exc:
-            warnings.append(
-                f"Could not read sport settings, moving_time estimates may be rough ({exc})."
+        settings_body = await self.get_sport_settings()
+        paces = {
+            sport: pace
+            for sport in wanted
+            if (pace := threshold_pace_seconds_per_km(settings_body, sport)) is not None
+        }
+        missing = [sport for sport in wanted if sport not in paces]
+        if missing:
+            raise IntervalsValidationError(
+                "Cannot push pace workout(s): no threshold_pace is configured in "
+                "Intervals.icu Sport Settings for "
+                + ", ".join(repr(sport) for sport in missing)
+                + ". Configure threshold pace first; without it absolute min/km targets "
+                "cannot be converted to '% Pace' and Intervals.icu cannot resolve pace "
+                "steps or calculate training load."
             )
-            return {}, warnings
-
-        paces: dict[str, float] = {}
-        for sport in sports:
-            pace = threshold_pace_seconds_per_km(settings_body, sport)
-            if pace is None:
-                warnings.append(
-                    f"No threshold pace configured for '{sport}' in Intervals.icu Sport "
-                    "Settings, so distance-based steps use a rough estimate."
-                )
-            else:
-                paces[sport] = pace
-        return paces, warnings
+        return paces

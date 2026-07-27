@@ -5,6 +5,7 @@ import pytest
 from app.intervals.errors import IntervalsValidationError
 from app.intervals.models import WorkoutSpec
 from app.intervals.workout_dsl import (
+    absolute_pace_to_threshold_percent,
     format_distance,
     format_duration,
     parse_distance,
@@ -96,10 +97,15 @@ def test_distance_steps_never_render_with_a_bare_m_suffix():
         ],
     )
 
-    description = render_workout(spec).description
+    description = render_workout(
+        spec, threshold_pace_seconds_per_km=240.0
+    ).description
 
     assert description == (
-        "- 16km 70% Pace\n- 6km 4:15/km\n- 400mtr 4:00/km"
+        "Main Set\n"
+        "- 16km 70% Pace\n"
+        "- 6km 94% Pace\n"
+        "- 400mtr 100% Pace"
     )
     # No step may end its length in a bare "m", which would mean minutes.
     for line in description.splitlines():
@@ -140,6 +146,35 @@ def test_resolve_target_pace_per_mile_converts_to_seconds_per_km():
     target = resolve_target("6:26/mi", "pace")
     assert target.kind == "pace"
     assert target.pace_seconds_per_km == pytest.approx(386 * 1000 / 1609.344)
+
+
+def test_absolute_pace_converts_to_percent_of_threshold_speed():
+    assert absolute_pace_to_threshold_percent(240.0, 240.0) == 100
+    assert absolute_pace_to_threshold_percent(255.0, 240.0) == 94
+    assert absolute_pace_to_threshold_percent(300.0, 240.0) == 80
+
+
+def test_absolute_pace_conversion_rejects_non_positive_values():
+    with pytest.raises(IntervalsValidationError):
+        absolute_pace_to_threshold_percent(0, 240)
+    with pytest.raises(IntervalsValidationError):
+        absolute_pace_to_threshold_percent(240, 0)
+
+
+def test_absolute_pace_requires_threshold_pace_to_render_percent():
+    spec = WorkoutSpec(
+        date="2026-07-29",
+        name="Absolute pace",
+        target_type="pace",
+        external_id="absolute",
+        steps=[{"type": "work", "duration": "20min", "target": "4:15/km"}],
+    )
+
+    with pytest.raises(IntervalsValidationError) as excinfo:
+        render_workout(spec)
+
+    assert "threshold_pace" in str(excinfo.value)
+    assert "% Pace" in str(excinfo.value)
 
 
 def test_resolve_target_heart_rate():
@@ -192,13 +227,15 @@ def test_render_matches_native_intervals_syntax():
     rendered = render_workout(spec, threshold_pace_seconds_per_km=240.0)
 
     assert rendered.description == (
-        "- 15m 70% Pace Warmup\n"
+        "Warmup\n"
+        "- 15m 70% Pace\n"
         "\n"
-        "4x\n"
-        "- 2km 4:00-4:02/km\n"
+        "Main Set 4x\n"
+        "- 2km 99-100% Pace\n"
         "- 2m 70% Pace\n"
         "\n"
-        "- 10m 70% Pace Cooldown"
+        "Cooldown\n"
+        "- 10m 70% Pace"
     )
     assert rendered.target == "PACE"
 
@@ -225,12 +262,14 @@ def test_render_blank_lines_group_consecutive_plain_steps():
     )
 
     assert render_workout(spec).description == (
-        "- 15m 55% Pace Warmup\n"
+        "Warmup\n"
+        "- 15m 55% Pace\n"
         "\n"
-        "3x\n"
+        "Main Set 3x\n"
         "- 1m 150% Pace\n"
         "- 1m 50% Pace\n"
         "\n"
+        "Main Set\n"
         "- 5m 50% Pace\n"
         "- 5m 120% Pace\n"
         "- 15m 55% Pace"
@@ -251,7 +290,7 @@ def test_render_omits_repeat_header_for_single_repetition():
             }
         ],
     )
-    assert render_workout(spec).description == "- 10m 100% Pace"
+    assert render_workout(spec).description == "Main Set\n- 10m 100% Pace"
 
 
 def test_moving_time_sums_time_steps_and_repeats():
@@ -290,7 +329,9 @@ def test_moving_time_uses_absolute_pace_for_distance_steps():
         ],
     )
     # 2 km at 240 s/km = 480 s per rep, twice.
-    assert render_workout(spec).moving_time == 960
+    rendered = render_workout(spec, threshold_pace_seconds_per_km=240.0)
+    assert rendered.description == "Main Set 2x\n- 2km 100% Pace"
+    assert rendered.moving_time == 960
 
 
 def test_moving_time_derives_pace_from_threshold_percentage():
@@ -351,7 +392,13 @@ def test_hr_workout_renders_bpm_and_hr_target():
     )
     rendered = render_workout(spec)
     assert rendered.target == "HR"
-    assert rendered.description == "- 10m 68% HR Warmup\n- 40m 140-150bpm"
+    assert rendered.description == (
+        "Warmup\n"
+        "- 10m 68% HR\n"
+        "\n"
+        "Main Set\n"
+        "- 40m 140-150bpm"
+    )
 
 
 def test_notes_are_appended_after_the_steps():
@@ -364,7 +411,7 @@ def test_notes_are_appended_after_the_steps():
         steps=[{"type": "work", "duration": "30min", "target": "easy"}],
     )
     assert render_workout(spec).description == (
-        "- 30m 70% Pace\n\nHydrate before starting."
+        "Main Set\n- 30m 70% Pace\n\nHydrate before starting."
     )
 
 
@@ -392,22 +439,28 @@ def _open_spec(**overrides) -> WorkoutSpec:
 
 
 def test_open_warmup_and_cooldown_render_without_a_length():
-    rendered = render_workout(_open_spec())
+    rendered = render_workout(_open_spec(), threshold_pace_seconds_per_km=240.0)
 
     assert rendered.description == (
-        "- 70% Pace Warmup\n"
+        "Warmup\n"
+        "- 70% Pace\n"
         "\n"
-        "3x\n"
-        "- 1km 4:00/km\n"
+        "Main Set 3x\n"
+        "- 1km 100% Pace\n"
         "- 2m 70% Pace\n"
         "\n"
-        "- 70% Pace Cooldown"
+        "Cooldown\n"
+        "- 70% Pace"
     )
     assert rendered.open_steps == 2
 
 
 def test_open_steps_contribute_a_nominal_duration_to_moving_time():
-    rendered = render_workout(_open_spec(), open_step_nominal_seconds=600)
+    rendered = render_workout(
+        _open_spec(),
+        threshold_pace_seconds_per_km=240.0,
+        open_step_nominal_seconds=600,
+    )
 
     # 600 open warmup + 3 * (240 work + 120 recovery) + 600 open cooldown
     assert rendered.moving_time == 2280
@@ -415,16 +468,22 @@ def test_open_steps_contribute_a_nominal_duration_to_moving_time():
 
 
 def test_explicit_moving_time_silences_the_open_step_estimate_warning():
-    rendered = render_workout(_open_spec(moving_time=3000))
+    rendered = render_workout(
+        _open_spec(moving_time=3000), threshold_pace_seconds_per_km=240.0
+    )
 
     assert rendered.moving_time == 3000
     assert not any("open step(s) counted" in warning for warning in rendered.warnings)
 
 
 def test_nominal_style_emits_a_timed_step_and_warns_it_is_not_open():
-    rendered = render_workout(_open_spec(), open_step_style="nominal")
+    rendered = render_workout(
+        _open_spec(),
+        threshold_pace_seconds_per_km=240.0,
+        open_step_style="nominal",
+    )
 
-    assert rendered.description.startswith("- 10m 70% Pace Warmup")
+    assert rendered.description.startswith("Warmup\n- 10m 70% Pace")
     assert any("will NOT reach the watch as an open" in w for w in rendered.warnings)
 
 
@@ -433,13 +492,15 @@ def test_open_step_keeps_a_custom_label_and_target():
         steps=[{"type": "warmup", "target": "5:30-5:50/km", "label": "Open WU"}]
     )
 
-    assert render_workout(spec).description == "- 5:30-5:50/km Open WU"
+    assert render_workout(
+        spec, threshold_pace_seconds_per_km=240.0
+    ).description == "Warmup\n- 69-73% Pace Open WU"
 
 
 def test_open_step_defaults_to_the_easy_target_when_none_is_given():
     spec = _open_spec(steps=[{"type": "warmup"}])
 
-    assert render_workout(spec).description == "- 70% Pace Warmup"
+    assert render_workout(spec).description == "Warmup\n- 70% Pace"
 
 
 def test_open_step_still_enforces_the_pace_hr_rule():
@@ -482,7 +543,7 @@ def test_plain_notes_pass_through_unchanged():
     rendered = render_workout(_noted("Hidrátate antes de salir.\nPista mojada."))
 
     assert rendered.description == (
-        "- 30m 70% Pace\n\nHidrátate antes de salir.\nPista mojada."
+        "Main Set\n- 30m 70% Pace\n\nHidrátate antes de salir.\nPista mojada."
     )
     assert rendered.warnings == []
 
@@ -518,4 +579,4 @@ def test_custom_label_is_appended_to_the_step_line():
         external_id="label",
         steps=[{"type": "work", "duration": "20min", "target": "tempo", "label": "Tempo block"}],
     )
-    assert render_workout(spec).description == "- 20m 90% Pace Tempo block"
+    assert render_workout(spec).description == "Main Set\n- 20m 90% Pace Tempo block"

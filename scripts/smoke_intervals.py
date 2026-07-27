@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for the Intervals.icu integration.
 
-Pushes ONE throwaway workout, verifies it landed on the calendar, deletes it and
-verifies it is gone. Run this before loading a whole training week.
+Pushes two throwaway workouts, verifies Intervals.icu generated resolved pace
+steps and positive training load, deletes them, and verifies they are gone. Run
+this before loading a whole training week.
 
 It talks to the Intervals.icu API directly (not through MCP) so a failure points
 at the API chain rather than at the transport.
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -96,21 +98,16 @@ async def run(target_date: date, keep: bool) -> int:
     print(f"Intervals.icu smoke test  athlete={settings.athlete_id}  date={day}")
     print(f"open step style: {settings.open_step_style}\n")
 
-    # 1. Authentication + sport settings.
-    print("1. Reading sport settings (checks authentication)")
+    # 1. Authentication + required threshold pace.
+    print("1. Reading Run threshold_pace (checks authentication and prerequisites)")
     try:
-        await client.get_sport_settings()
+        paces = await client.require_threshold_paces(["Run"])
     except IntervalsError as exc:
         log_fail(str(exc))
         return 1
-    log_ok("authenticated")
 
-    paces, pace_warnings = await client.threshold_paces(["Run"])
-    for warning in pace_warnings:
-        log_info(f"warning: {warning}")
-    threshold = paces.get("Run")
-    if threshold:
-        log_ok(f"Run threshold pace: {format_pace(threshold)}")
+    threshold = paces["Run"]
+    log_ok(f"authenticated; Run threshold pace: {format_pace(threshold)}")
 
     # 2. Push both workouts: a fully timed one and one with open warm-up/cool-down.
     print("\n2. Pushing two workouts (one timed, one with open warm-up/cool-down)")
@@ -145,12 +142,24 @@ async def run(target_date: date, keep: bool) -> int:
         return 1
     log_ok("\nupsert accepted for both workouts")
 
+    async def cleanup_after_failure() -> None:
+        if keep:
+            log_info(f"--keep given: leaving {sorted(specs)} on the calendar")
+            return
+        try:
+            await client.bulk_delete_events([{"external_id": key} for key in specs])
+        except IntervalsError as exc:
+            log_fail(f"cleanup failed; delete {sorted(specs)} manually: {exc}")
+        else:
+            log_info("removed the temporary workouts after the failed check")
+
     # 3. Verify both are on the calendar, and read back what Intervals.icu stored.
     print("\n3. Verifying the workouts are on the calendar")
     try:
         found = await client.list_events(oldest=day, newest=day, category="WORKOUT")
     except IntervalsError as exc:
         log_fail(str(exc))
+        await cleanup_after_failure()
         return 1
 
     by_external_id = {item.get("external_id"): item for item in found}
@@ -161,6 +170,7 @@ async def run(target_date: date, keep: bool) -> int:
                 f"workout {wanted} not found on {day}. "
                 f"Events that day: {sorted(str(key) for key in by_external_id)}"
             )
+            await cleanup_after_failure()
             return 1
         log_ok(f"found {wanted} (event id={event.get('id')})")
 
@@ -183,53 +193,74 @@ async def run(target_date: date, keep: bool) -> int:
         "and report what the UI shows."
     )
 
-    # 3b. The structured targets: pace, not power, and a computed training load.
-    print("\n3b. Checking the resolved step targets and training load")
+    # 3b. GET the pushed events with resolve=true. Intervals.icu must have
+    # generated structured steps from description, resolved pace to m/s, and
+    # calculated a positive load.
+    print("\n3b. GET events?resolve=true: checking resolved pace steps and training load")
     failures = 0
     try:
-        resolved = await client.list_events(
-            oldest=day, newest=day, category="WORKOUT", resolve=True
+        resolved_events = await client.list_events(
+            oldest=day,
+            newest=day,
+            category="WORKOUT",
+            resolve=True,
         )
     except IntervalsError as exc:
-        log_fail(str(exc))
+        log_fail(f"GET events?resolve=true failed: {exc}")
+        await cleanup_after_failure()
         return 1
+    resolved_by_external_id = {
+        event.get("external_id"): event for event in resolved_events
+    }
 
-    for event in resolved:
-        if event.get("external_id") not in specs:
+    for name in (external_id, open_external_id):
+        event = resolved_by_external_id.get(name)
+        if event is None:
+            log_fail(f"{name}: missing from GET events?resolve=true response")
+            failures += 1
             continue
+
         report = inspect_step_targets(event)
-        name = event.get("external_id")
 
         if not report["has_workout_doc"]:
-            log_fail(f"{name}: no structured workout_doc came back")
+            log_fail(f"{name}: Intervals.icu did not generate a structured workout_doc")
+            failures += 1
+        elif not report["step_count"]:
+            log_fail(f"{name}: Intervals.icu generated 0 structured steps")
             failures += 1
         elif report["mentions_power"]:
             log_fail(
-                f"{name}: a step resolved to POWER. Every percentage must carry an "
-                "explicit 'Pace' qualifier, or Intervals.icu reads it as % of FTP."
+                f"{name}: a generated step resolved to POWER instead of pace"
             )
             failures += 1
-        elif not report["mentions_pace"]:
-            log_fail(f"{name}: no pace target in the resolved steps")
+        elif not report["pace_resolved_mps"]:
+            log_fail(f"{name}: pace targets were not resolved to m/s")
+            log_info(
+                "resolved workout_doc: "
+                + json.dumps(report["workout_doc"], ensure_ascii=False)[:4000]
+            )
             failures += 1
         else:
-            log_ok(f"{name}: steps resolved with pace targets ({report['step_count']} steps)")
+            log_ok(
+                f"{name}: {report['step_count']} generated steps with pace resolved to m/s"
+            )
 
         load = report["training_load"]
         if load and load > 0:
-            log_ok(f"{name}: training load {load} ({', '.join(report['load_fields'])})")
+            log_ok(f"{name}: icu_training_load={load}")
         else:
             log_fail(
-                f"{name}: no training load computed. Check that Sport Settings has a "
-                f"threshold pace for Run. Load-like fields seen: {report['load_fields'] or 'none'}"
+                f"{name}: icu_training_load must be > 0, got "
+                f"{event.get('icu_training_load')!r}"
             )
             failures += 1
 
     if failures:
         log_info(
-            "Structured targets are wrong. The description text is what Intervals.icu "
-            "parses, so inspect it above rather than hand-building workout_doc steps."
+            "Intervals.icu must generate workout_doc from description; never send a "
+            "separate workout_doc in the event payload."
         )
+        await cleanup_after_failure()
         return 1
 
     if keep:

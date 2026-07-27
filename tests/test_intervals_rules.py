@@ -130,7 +130,9 @@ def test_percentage_targets_are_valid_for_both_target_types():
         rendered = render_workout(
             spec(target_type=target_type, steps=[{"type": "work", "duration": "20min", "target": "90%"}])
         )
-        assert rendered.description == "- 20m 90% " + ("Pace" if target_type == "pace" else "HR")
+        assert rendered.description == "Main Set\n- 20m 90% " + (
+            "Pace" if target_type == "pace" else "HR"
+        )
 
 
 def test_target_type_must_be_pace_or_hr():
@@ -237,10 +239,7 @@ def test_build_event_payload_shape():
         "start_date_local": "2026-07-27T00:00:00",
         "type": "Run",
         "name": "Easy run",
-        "description": "- 30m 70% Pace",
-        # Intervals.icu parses the text itself; the documented form is
-        # description-only, not a hand-built steps array.
-        "workout_doc": {"description": "- 30m 70% Pace"},
+        "description": "Main Set\n- 30m 70% Pace",
         "moving_time": 1800,
         "target": "PACE",
         "external_id": "w1-mon",
@@ -266,6 +265,55 @@ def test_threshold_pace_ignores_missing_or_absurd_values():
     assert threshold_pace_seconds_per_km([{"types": ["Run"]}], "Run") is None
     assert threshold_pace_seconds_per_km([{"types": ["Run"], "threshold_pace": 0}], "Run") is None
     assert threshold_pace_seconds_per_km("nonsense", "Run") is None
+
+
+def test_require_threshold_paces_fails_clearly_when_missing(monkeypatch):
+    import asyncio
+
+    from app.intervals.client import IntervalsClient
+    from app.intervals.config import IntervalsSettings
+
+    client = IntervalsClient(IntervalsSettings(INTERVALS_API_KEY="test"))
+
+    async def fake_settings():
+        return [{"types": ["Run"], "threshold_pace": None}]
+
+    monkeypatch.setattr(client, "get_sport_settings", fake_settings)
+
+    with pytest.raises(IntervalsValidationError) as excinfo:
+        asyncio.run(client.require_threshold_paces(["Run"]))
+
+    message = str(excinfo.value)
+    assert "threshold_pace" in message
+    assert "'Run'" in message
+    assert "% Pace" in message
+
+
+def test_list_events_sends_resolve_true(monkeypatch):
+    import asyncio
+
+    from app.intervals.client import IntervalsClient
+    from app.intervals.config import IntervalsSettings
+
+    client = IntervalsClient(IntervalsSettings(INTERVALS_API_KEY="test"))
+    captured = {}
+
+    async def fake_request(method, path, *, params=None, json=None):
+        captured.update(method=method, path=path, params=params)
+        return []
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    asyncio.run(
+        client.list_events(
+            oldest="2026-07-28",
+            newest="2026-07-28",
+            category="WORKOUT",
+            resolve=True,
+        )
+    )
+
+    assert captured["method"] == "GET"
+    assert captured["params"]["resolve"] == "true"
 
 
 def test_inspect_step_targets_flags_a_power_target():
@@ -301,8 +349,31 @@ def test_inspect_step_targets_reports_pace_and_load():
 
     assert report["mentions_pace"] is True
     assert report["mentions_power"] is False
+    assert report["pace_resolved_mps"] is True
     assert report["training_load"] == 87
     assert report["load_fields"] == {"icu_training_load": 87}
+
+
+def test_inspect_step_targets_recognizes_resolved_private_pace_as_mps():
+    """The events endpoint returns resolved m/s values under `_pace`."""
+    from app.intervals.client import inspect_step_targets
+
+    report = inspect_step_targets(
+        {
+            "workout_doc": {
+                "steps": [
+                    {
+                        "pace": {"value": 100, "units": "%pace"},
+                        "_pace": {"value": 4.25, "start": 4.15, "end": 4.36},
+                    }
+                ]
+            },
+            "icu_training_load": 20,
+        }
+    )
+
+    assert report["pace_resolved_mps"] is True
+    assert report["mentions_power"] is False
 
 
 def test_inspect_step_targets_handles_a_missing_workout_doc():
@@ -312,6 +383,7 @@ def test_inspect_step_targets_handles_a_missing_workout_doc():
 
     assert report["has_workout_doc"] is False
     assert report["step_count"] is None
+    assert report["pace_resolved_mps"] is False
     assert report["training_load"] == 0
 
 
