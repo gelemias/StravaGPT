@@ -355,6 +355,53 @@ def test_delete_events_without_references_is_rejected(client):
     assert "Nothing to delete" in json.dumps(result)
 
 
+def test_health_survives_a_storage_outage(client, monkeypatch):
+    """A Turso outage must not answer 500 and get the instance restarted.
+
+    Render cycles any instance whose health check fails, which would take the
+    MCP endpoint down with it even though MCP never touches the database.
+    """
+    import app.main as main
+
+    def explode(self):
+        raise RuntimeError("stream closed: libsql://db-org.turso.io token=sup3rsecret")
+
+    monkeypatch.setattr(main.Storage, "init_db", explode)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["storage_ok"] is False
+    assert body["authorized"] is None
+    assert "RuntimeError" in body["storage_error"]
+    # The MCP block is unaffected by the storage failure.
+    assert body["mcp"]["path"] == "/mcp"
+
+
+def test_health_storage_error_redacts_credentials(client, monkeypatch):
+    import app.main as main
+    from app.config import Settings
+
+    secret = "turso-token-value"
+
+    def explode(self):
+        raise RuntimeError(f"auth failed with {secret}")
+
+    monkeypatch.setattr(main.Storage, "init_db", explode)
+    main.app.dependency_overrides[get_settings] = lambda: Settings(
+        TURSO_AUTH_TOKEN=secret, TURSO_DATABASE_URL="libsql://x.turso.io"
+    )
+    try:
+        body = client.get("/health").json()
+    finally:
+        main.app.dependency_overrides.clear()
+
+    assert secret not in body["storage_error"]
+    assert "<redacted>" in body["storage_error"]
+
+
 def test_strava_routes_still_work_alongside_mcp(client):
     response = client.get("/health")
 
